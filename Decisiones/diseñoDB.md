@@ -1,0 +1,3 @@
+Solución multi-tenancy:
+
+Elegimos la tabla compartida con Row-Level Security (RLS) en PostgreSQL porque maximiza la eficiencia transaccional y unifica los datos de forma nativa —un requisito indispensable para construir sin fricciones la capa analítica distribuida de la Etapa 2—, mientras que el aislamiento estricto y la seguridad de la información médica sensible no quedan a merced del código de la aplicación, sino que se blindan e imponen directamente a nivel del motor de base de datos mediante políticas automatizadas.
