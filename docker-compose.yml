@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgres:16
+    container_name: MediCitas
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "5433:5432"
+    volumes:
+      - MediCitasData:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  flyway:
+    image: flyway/flyway:latest
+    container_name: mi_flyway_migration
+    depends_on:
+      db:
+        condition: service_healthy
+    command:
+      - -url=jdbc:postgresql://db:5432/${DB_NAME}
+      - -user=${DB_USER}
+      - -password=${DB_PASSWORD}
+      - -baselineOnMigrate=true
+      - migrate
+    volumes:
+      - "./Base de datos/Scripts:/flyway/sql"
+
+volumes:
+  MediCitasData:
