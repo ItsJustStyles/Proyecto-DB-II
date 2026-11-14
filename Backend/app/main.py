@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 
 from .routers import admin, agenda, auditoria, citas, notas, pacientes
 from .tenancy import TenantGuardError
-from . import db
+from . import db, cache
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("medicitas")
@@ -15,6 +15,7 @@ log = logging.getLogger("medicitas")
 async def lifespan(app: FastAPI):
     await db.open_pool()
     yield
+    await cache.cerrar()
     await db.close_pool()
 
 app = FastAPI(
