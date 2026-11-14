@@ -5,6 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from .routers import admin, agenda, auditoria, citas, notas, pacientes
+from .tenancy import TenantGuardError
 from . import db
 
 logging.basicConfig(level=logging.INFO)
@@ -39,4 +40,9 @@ async def health():
 async def _no_controlada(_: Request, exc: Exception):
     # Una entrada mal formada o un fallo inesperado nunca tumban el servicio.
     log.exception("Error no controlado")
+    return JSONResponse(status_code=500, content={"detail": {"codigo": "ERROR_INTERNO", "mensaje": "Error interno"}})
+
+@app.exception_handler(TenantGuardError)
+async def _tenant_guard(_: Request, exc: TenantGuardError):
+    log.error("TenantGuardError: %s", exc)
     return JSONResponse(status_code=500, content={"detail": {"codigo": "ERROR_INTERNO", "mensaje": "Error interno"}})

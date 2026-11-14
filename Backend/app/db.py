@@ -13,6 +13,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from .config import settings
 from .permisos import ROL_ID_A_NOMBRE, ROL_ID_A_ROL_BD
+from .tenancy import asegurar_filtro_clinica, parametros_con_clinica
 log = logging.getLogger("medicitas.db")
 
 pool: AsyncConnectionPool | None = None
@@ -67,6 +68,36 @@ async def resolver_identidad(sub: str) -> Principal | None:
         return None
     return Principal(sub=sub, usuario_id=row["usuario_id"], clinica_id=row["clinica_id"], rol_id=row["rol_id"])
 
+class Tx:
+    """Operaciones dentro de la transaccion. Todo acceso a tablas de negocio pasa por aqui."""
+
+    def __init__(self, conn: psycopg.AsyncConnection, principal: Principal):
+        self.conn = conn
+        self.p = principal
+        self.after_commit: list[Callable[[], Awaitable[None]]] = []
+
+    async def fetch(self, query: str, params: dict | None = None) -> list[dict]:
+        asegurar_filtro_clinica(query)
+        cur = await self.conn.execute(query, parametros_con_clinica(params, self.p.clinica_id))
+        return await cur.fetchall() if cur.description else []
+
+    async def one(self, query: str, params: dict | None = None) -> dict | None:
+        rows = await self.fetch(query, params)
+        return rows[0] if rows else None
+
+    async def execute(self, query: str, params: dict | None = None) -> int:
+        asegurar_filtro_clinica(query)
+        cur = await self.conn.execute(query, parametros_con_clinica(params, self.p.clinica_id))
+        return cur.rowcount
+
+    async def fetch_catalogo(self, query: str, params: dict | None = None) -> list[dict]:
+        """Solo para catalogos globales (rol, especialidad, estado_cita) y funciones de plataforma."""
+        cur = await self.conn.execute(query, params or {})
+        return await cur.fetchall() if cur.description else []
+
+    def tras_commit(self, cb: Callable[[], Awaitable[None]]) -> None:
+        self.after_commit.append(cb)
+
 def _http(status: int, codigo: str, mensaje: str) -> HTTPException:
     return HTTPException(status_code=status, detail={"codigo": codigo, "mensaje": mensaje})
 
@@ -99,3 +130,35 @@ def traducir_error_bd(e: psycopg.Error) -> HTTPException:
         return _http(503, "REINTENTAR", "Conflicto transitorio, reintente la operacion")
     log.exception("Error de base de datos no mapeado: sqlstate=%s", code)
     return _http(500, "ERROR_INTERNO", "Error interno")
+
+async def run(principal: Principal, fn: Callable[[Tx], Awaitable[Any]]) -> Any:
+    """
+    Ejecuta `fn` en una transaccion READ COMMITTED con el rol de BD del usuario.
+
+    Reintenta deadlocks (40P01) y fallos de serializacion (40001). Si `fn` lanza
+    HTTPException la transaccion se revierte y la excepcion se propaga.
+    """
+    assert pool is not None
+    intento = 0
+    while True:
+        tx: Tx | None = None
+        try:
+            async with pool.connection() as conn:
+                async with conn.transaction():
+                    await conn.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+                    await conn.execute(sql.SQL("SET LOCAL ROLE {}").format(sql.Identifier(principal.rol_bd)))
+                    tx = Tx(conn, principal)
+                    result = await fn(tx)
+            break
+        except psycopg.Error as e:
+            if getattr(e, "sqlstate", None) in ("40P01", "40001") and intento < settings.max_retries:
+                intento += 1
+                await asyncio.sleep(random.uniform(0.01, 0.05) * intento)
+                continue
+            raise traducir_error_bd(e)
+    for cb in tx.after_commit if tx else []:
+        try:
+            await cb()
+        except Exception:  # la invalidacion de cache nunca debe romper una operacion ya confirmada
+            log.exception("Fallo en accion posterior al commit")
+    return result
