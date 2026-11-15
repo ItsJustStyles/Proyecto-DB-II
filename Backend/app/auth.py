@@ -14,6 +14,7 @@ import asyncio
 
 import jwt
 from fastapi import Depends, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient
 
 from . import db
@@ -22,6 +23,9 @@ from .db import Principal
 from .permisos import rol_permitido
 
 _jwks = PyJWKClient(settings.oidc_jwks_url, cache_keys=True, lifespan=3600)
+
+# Solo registra el esquema Bearer en OpenAPI (boton Authorize de /docs); la validacion la hace get_principal.
+bearer = HTTPBearer(auto_error=False)
 
 
 def _no_autenticado(msg: str) -> HTTPException:
@@ -46,7 +50,10 @@ def _validar_token(token: str) -> dict:
     return claims
 
 
-async def get_principal(request: Request) -> Principal:
+async def get_principal(
+    request: Request,
+    _cred: HTTPAuthorizationCredentials | None = Depends(bearer),
+) -> Principal:
     header = request.headers.get("Authorization", "")
     esquema, _, token = header.partition(" ")
     if esquema.lower() != "bearer" or not token:
