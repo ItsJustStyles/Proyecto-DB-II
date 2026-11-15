@@ -1,4 +1,4 @@
-"""RF9 a RF13, RF20 y RF21: ciclo de vida de la cita.
+"""RF9 a RF13, RF20 y RF21: ciclo de vida de la cita (con invalidacion de cache en Redis).
 
 Reserva (RF9): un INSERT en una transaccion. La carrera por el ultimo espacio la decide la
 exclusion constraint ex_cita_profesional_sin_solape (I1): la transaccion que llega segunda
@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Header, HTTPException, Query
 from psycopg import errors as pgerr
 
-from .. import db
+from .. import cache, db
 from ..schemas import CancelarIn, CitaIn, DesenlaceIn, ReprogramarIn
 
 router = APIRouter(prefix="/api/v1", tags=["citas"])
@@ -68,6 +68,10 @@ async def _zona_clinica(cur, clinica_id: int) -> ZoneInfo:
     return ZoneInfo(row["zona_horaria"])
 
 
+def _fecha_local(instante: datetime, tz: ZoneInfo) -> date:
+    return instante.astimezone(tz).date()
+
+
 def _limites_dia(fecha: date, tz: ZoneInfo) -> tuple[datetime, datetime]:
     ini = datetime.combine(fecha, time.min, tzinfo=tz)
     fin = datetime.fromtimestamp(ini.timestamp() + 86400, tz=tz)
@@ -95,6 +99,7 @@ async def reservar(
         async with db.pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
+                    tz = await _zona_clinica(cur, clinica_id)
                     # `fin` lo calcula el trigger trg_cita_fin_por_servicio a partir del servicio (I4)
                     await cur.execute(
                         f"""
@@ -117,9 +122,13 @@ async def reservar(
                             "u": usuario_id,
                         },
                     )
-                    return await cur.fetchone()
+                    row = await cur.fetchone()
     except pgerr.DatabaseError as exc:
         raise _manejar_error_pg(exc)
+
+    # Invalidar DESPUES del commit (I8)
+    await cache.invalidar_dia(clinica_id, body.profesional_id, _fecha_local(row["inicio"], tz).isoformat())
+    return row
 
 
 # ---------------------------------------------------------------- RF10 reprogramar
@@ -144,6 +153,7 @@ async def reprogramar(
         async with db.pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
+                    tz = await _zona_clinica(cur, clinica_id)
                     await cur.execute(
                         """
                         SELECT cita_id, paciente_id, profesional_id, servicio_id, inicio, estado_id
@@ -194,9 +204,19 @@ async def reprogramar(
                             "u": usuario_id,
                         },
                     )
-                    return await cur.fetchone()
+                    nueva = await cur.fetchone()
     except pgerr.DatabaseError as exc:
         raise _manejar_error_pg(exc)
+
+    # Invalidar ambos dias/profesionales afectados DESPUES del commit (I7, I8)
+    afectados = {
+        (vieja["profesional_id"], _fecha_local(vieja["inicio"], tz).isoformat()),
+        (nuevo_prof, _fecha_local(nueva["inicio"], tz).isoformat()),
+    }
+    for prof_id, fecha_str in afectados:
+        await cache.invalidar_dia(clinica_id, prof_id, fecha_str)
+
+    return nueva
 
 
 # ---------------------------------------------------------------- RF11 cancelar
@@ -217,6 +237,7 @@ async def cancelar(
         async with db.pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
+                    tz = await _zona_clinica(cur, clinica_id)
                     await cur.execute(
                         """
                         SELECT profesional_id, inicio, estado_id
@@ -249,9 +270,12 @@ async def cancelar(
                             "c": cita_id,
                         },
                     )
-                    return await cur.fetchone()
+                    row = await cur.fetchone()
     except pgerr.DatabaseError as exc:
         raise _manejar_error_pg(exc)
+
+    await cache.invalidar_dia(clinica_id, actual["profesional_id"], _fecha_local(actual["inicio"], tz).isoformat())
+    return row
 
 
 # ---------------------------------------------------------------- RF12 desenlace
@@ -272,6 +296,7 @@ async def desenlace(
         async with db.pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
+                    tz = await _zona_clinica(cur, clinica_id)
                     await cur.execute(
                         """
                         SELECT profesional_id, inicio, estado_id
@@ -302,9 +327,12 @@ async def desenlace(
                             "c": cita_id,
                         },
                     )
-                    return await cur.fetchone()
+                    row = await cur.fetchone()
     except pgerr.DatabaseError as exc:
         raise _manejar_error_pg(exc)
+
+    await cache.invalidar_dia(clinica_id, actual["profesional_id"], _fecha_local(actual["inicio"], tz).isoformat())
+    return row
 
 
 @router.get("/citas/{cita_id}", summary="Detalle de una cita de la clinica")

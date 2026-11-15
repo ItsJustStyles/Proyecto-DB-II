@@ -42,17 +42,20 @@ services:
       - "./Base de datos/Scripts:/flyway/sql"
 
   app:
-    build: ./Backend
-    environment:
-      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
-      REDIS_URL: redis://redis:6379/0
-    ports:
-      - "8000:8000"
-    depends_on:
-      db:
-        condition: service_healthy
-      flyway:
-        condition: service_completed_successfully
+      build: ./Backend
+      environment:
+        DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
+        REDIS_URL: redis://redis:6379/0
+        CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-300}
+      ports:
+        - "8000:8000"
+      depends_on:
+        db:
+          condition: service_healthy
+        redis:
+          condition: service_healthy
+        flyway:
+          condition: service_completed_successfully
 
 volumes:
   MediCitasData:

@@ -1,8 +1,8 @@
-"""RF1 a RF4: clinicas, usuarios, servicios, profesionales y su relacion."""
+"""RF1 a RF4: clinicas, usuarios, servicios, profesionales y su relacion (con invalidacion de cache)."""
 from fastapi import APIRouter, Header, HTTPException, Response
 from psycopg import errors as pgerr
 
-from .. import db
+from .. import cache, db
 from ..schemas import (
     ClinicaIn,
     ProfesionalIn,
@@ -358,9 +358,11 @@ async def actualizar_profesional(
                 row = await cur.fetchone()
                 if row is None:
                     raise _error(404, "NO_ENCONTRADO", "El profesional no existe en esta clinica")
-                return row
     except pgerr.ForeignKeyViolation:
         raise _error(422, "REFERENCIA_INVALIDA", "La especialidad indicada no existe")
+
+    await cache.invalidar_profesional(clinica_id, profesional_id)
+    return row
 
 
 @router.post("/profesionales/{profesional_id}/servicios", status_code=201, summary="RF4: habilita un servicio para el profesional")
@@ -382,13 +384,15 @@ async def asociar_servicio(
                     """,
                     {"clinica_id": clinica_id, "pid": profesional_id, "sid": body.servicio_id},
                 )
-                return {"profesional_id": profesional_id, "servicio_id": body.servicio_id}
     except pgerr.UniqueViolation:
         raise _error(409, "ASOCIACION_DUPLICADA", "El profesional ya tiene asociado ese servicio")
     except pgerr.ForeignKeyViolation:
         raise _error(422, "REFERENCIA_INVALIDA", "Profesional o servicio inexistente en esta clinica")
     except pgerr.CheckViolation:
         raise _error(422, "ESPECIALIDAD_INCOMPATIBLE", "La especialidad del profesional no coincide con la del servicio")
+
+    await cache.invalidar_profesional(clinica_id, profesional_id)
+    return {"profesional_id": profesional_id, "servicio_id": body.servicio_id}
 
 
 @router.delete("/profesionales/{profesional_id}/servicios/{servicio_id}", status_code=204, summary="RF4: retira un servicio del profesional")
@@ -414,4 +418,6 @@ async def desasociar_servicio(
             )
             if await cur.fetchone() is None:
                 raise _error(404, "NO_ENCONTRADO", "La asociacion no existe en esta clinica")
+
+    await cache.invalidar_profesional(clinica_id, profesional_id)
     return Response(status_code=204)

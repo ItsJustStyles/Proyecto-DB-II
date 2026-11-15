@@ -1,4 +1,4 @@
-"""RF5 a RF8: horarios, bloqueos y disponibilidad (consulta directa a BD; luego se agrega Redis)."""
+"""RF5 a RF8: horarios, bloqueos y disponibilidad (con cache en Redis)."""
 import os
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Header, HTTPException, Query, Response
 from psycopg import errors as pgerr
 
-from .. import db
+from .. import cache, db
 from ..schemas import BloqueoIn, HorarioIn
 
 router = APIRouter(prefix="/api/v1", tags=["agenda"])
@@ -114,11 +114,14 @@ async def crear_horario(
                         "hf": body.hora_fin,
                     },
                 )
-                return await cur.fetchone()
+                row = await cur.fetchone()
     except pgerr.ExclusionViolation:
         raise _error(409, "HORARIO_SOLAPADO", "El bloque se solapa con otro horario del profesional en ese dia")
     except pgerr.ForeignKeyViolation:
         raise _error(404, "NO_ENCONTRADO", "El profesional no existe en esta clinica")
+
+    await cache.invalidar_profesional(clinica_id, profesional_id)
+    return row
 
 
 @router.get(
@@ -164,12 +167,15 @@ async def eliminar_horario(
                 """
                 DELETE FROM horario_atencion
                  WHERE clinica_id = %(clinica_id)s AND horario_id = %(h)s
-                RETURNING horario_id
+                RETURNING profesional_id
                 """,
                 {"clinica_id": clinica_id, "h": horario_id},
             )
-            if await cur.fetchone() is None:
+            row = await cur.fetchone()
+            if row is None:
                 raise _error(404, "NO_ENCONTRADO", "El horario no existe en esta clinica")
+
+    await cache.invalidar_profesional(clinica_id, row["profesional_id"])
     return Response(status_code=204)
 
 
@@ -220,9 +226,11 @@ async def crear_bloqueo(
                         },
                     )
                     conflictos = await cur.fetchall()
-                    return {**row, "conflictos": conflictos}
     except pgerr.ForeignKeyViolation:
         raise _error(404, "REFERENCIA_INVALIDA", "Profesional o usuario inexistente en esta clinica")
+
+    await cache.invalidar_profesional(clinica_id, profesional_id)
+    return {**row, "conflictos": conflictos}
 
 
 @router.get(
@@ -305,102 +313,116 @@ async def eliminar_bloqueo(
                 """
                 DELETE FROM bloqueo_agenda
                  WHERE clinica_id = %(clinica_id)s AND bloqueo_id = %(b)s
-                RETURNING bloqueo_id
+                RETURNING profesional_id
                 """,
                 {"clinica_id": clinica_id, "b": bloqueo_id},
             )
-            if await cur.fetchone() is None:
+            row = await cur.fetchone()
+            if row is None:
                 raise _error(404, "NO_ENCONTRADO", "El bloqueo no existe en esta clinica")
+
+    await cache.invalidar_profesional(clinica_id, row["profesional_id"])
     return Response(status_code=204)
 
 
 # ---------------------------------------------------------------- RF7 / RF8 disponibilidad
 async def _espacios_profesional(
-    cur,
     clinica_id: int,
-    tz: ZoneInfo,
     profesional_id: int,
     fecha: date,
     servicio_id: int,
     ahora_utc: datetime,
 ) -> list[dict]:
-    await cur.execute(
-        "SELECT activo FROM profesional WHERE clinica_id = %(clinica_id)s AND profesional_id = %(pid)s",
-        {"clinica_id": clinica_id, "pid": profesional_id},
-    )
-    prof = await cur.fetchone()
-    if prof is None:
-        raise _error(404, "NO_ENCONTRADO", "El profesional no existe en esta clinica")
+    # 1) Leer versiones y buscar en Redis ANTES de consultar PostgreSQL (I8)
+    cacheado, clave = await cache.leer(clinica_id, profesional_id, fecha.isoformat(), servicio_id)
 
-    await cur.execute(
-        """
-        SELECT s.duracion_min, s.activo
-          FROM servicio s
-          JOIN profesional_servicio ps
-            ON ps.clinica_id = s.clinica_id AND ps.servicio_id = s.servicio_id
-         WHERE s.clinica_id = %(clinica_id)s
-           AND s.servicio_id = %(sid)s
-           AND ps.profesional_id = %(pid)s
-        """,
-        {"clinica_id": clinica_id, "sid": servicio_id, "pid": profesional_id},
-    )
-    serv = await cur.fetchone()
-    if serv is None:
-        raise _error(422, "SERVICIO_NO_HABILITADO", "El profesional no atiende ese servicio en esta clinica")
+    if cacheado is None:
+        async with db.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                tz = await _zona_clinica(cur, clinica_id)
 
-    if not prof["activo"] or not serv["activo"]:
-        return []
+                await cur.execute(
+                    "SELECT activo FROM profesional WHERE clinica_id = %(clinica_id)s AND profesional_id = %(pid)s",
+                    {"clinica_id": clinica_id, "pid": profesional_id},
+                )
+                prof = await cur.fetchone()
+                if prof is None:
+                    raise _error(404, "NO_ENCONTRADO", "El profesional no existe en esta clinica")
 
-    ini_dia, fin_dia = _limites_dia(fecha, tz)
+                await cur.execute(
+                    """
+                    SELECT s.duracion_min, s.activo
+                      FROM servicio s
+                      JOIN profesional_servicio ps
+                        ON ps.clinica_id = s.clinica_id AND ps.servicio_id = s.servicio_id
+                     WHERE s.clinica_id = %(clinica_id)s
+                       AND s.servicio_id = %(sid)s
+                       AND ps.profesional_id = %(pid)s
+                    """,
+                    {"clinica_id": clinica_id, "sid": servicio_id, "pid": profesional_id},
+                )
+                serv = await cur.fetchone()
+                if serv is None:
+                    raise _error(422, "SERVICIO_NO_HABILITADO", "El profesional no atiende ese servicio en esta clinica")
 
-    await cur.execute(
-        """
-        SELECT hora_inicio, hora_fin
-          FROM horario_atencion
-         WHERE clinica_id = %(clinica_id)s
-           AND profesional_id = %(pid)s
-           AND dia_semana = %(dow)s
-         ORDER BY hora_inicio
-        """,
-        {"clinica_id": clinica_id, "pid": profesional_id, "dow": fecha.isoweekday()},
-    )
-    bloques = await cur.fetchall()
+                if not prof["activo"] or not serv["activo"]:
+                    cacheado = []
+                else:
+                    ini_dia, fin_dia = _limites_dia(fecha, tz)
 
-    await cur.execute(
-        """
-        SELECT inicio, fin
-          FROM cita
-         WHERE clinica_id = %(clinica_id)s
-           AND profesional_id = %(pid)s
-           AND estado_id = 1
-           AND inicio < %(fd)s AND fin > %(id)s
-        """,
-        {"clinica_id": clinica_id, "pid": profesional_id, "id": ini_dia, "fd": fin_dia},
-    )
-    ocupados = await cur.fetchall()
+                    await cur.execute(
+                        """
+                        SELECT hora_inicio, hora_fin
+                          FROM horario_atencion
+                         WHERE clinica_id = %(clinica_id)s
+                           AND profesional_id = %(pid)s
+                           AND dia_semana = %(dow)s
+                         ORDER BY hora_inicio
+                        """,
+                        {"clinica_id": clinica_id, "pid": profesional_id, "dow": fecha.isoweekday()},
+                    )
+                    bloques = await cur.fetchall()
 
-    await cur.execute(
-        """
-        SELECT inicio, fin
-          FROM bloqueo_agenda
-         WHERE clinica_id = %(clinica_id)s
-           AND profesional_id = %(pid)s
-           AND tstzrange(inicio, fin) && tstzrange(%(id)s, %(fd)s)
-        """,
-        {"clinica_id": clinica_id, "pid": profesional_id, "id": ini_dia, "fd": fin_dia},
-    )
-    bloqueos = await cur.fetchall()
+                    await cur.execute(
+                        """
+                        SELECT inicio, fin
+                          FROM cita
+                         WHERE clinica_id = %(clinica_id)s
+                           AND profesional_id = %(pid)s
+                           AND estado_id = 1
+                           AND inicio < %(fd)s AND fin > %(id)s
+                        """,
+                        {"clinica_id": clinica_id, "pid": profesional_id, "id": ini_dia, "fd": fin_dia},
+                    )
+                    ocupados = await cur.fetchall()
 
-    return _calcular_slots(
-        fecha=fecha,
-        tz=tz,
-        bloques=[(b["hora_inicio"], b["hora_fin"]) for b in bloques],
-        duracion_min=serv["duracion_min"],
-        ocupados=[(o["inicio"], o["fin"]) for o in ocupados],
-        bloqueos=[(b["inicio"], b["fin"]) for b in bloqueos],
-        ahora_utc=ahora_utc,
-        paso_min=_SLOT_STEP_MIN,
-    )
+                    await cur.execute(
+                        """
+                        SELECT inicio, fin
+                          FROM bloqueo_agenda
+                         WHERE clinica_id = %(clinica_id)s
+                           AND profesional_id = %(pid)s
+                           AND tstzrange(inicio, fin) && tstzrange(%(id)s, %(fd)s)
+                        """,
+                        {"clinica_id": clinica_id, "pid": profesional_id, "id": ini_dia, "fd": fin_dia},
+                    )
+                    bloqueos = await cur.fetchall()
+
+                    # Se guarda el dia completo en cache; el filtro de espacios pasados se aplica al servir
+                    cacheado = _calcular_slots(
+                        fecha=fecha,
+                        tz=tz,
+                        bloques=[(b["hora_inicio"], b["hora_fin"]) for b in bloques],
+                        duracion_min=serv["duracion_min"],
+                        ocupados=[(o["inicio"], o["fin"]) for o in ocupados],
+                        bloqueos=[(b["inicio"], b["fin"]) for b in bloqueos],
+                        ahora_utc=datetime(1970, 1, 1, tzinfo=timezone.utc),
+                        paso_min=_SLOT_STEP_MIN,
+                    )
+
+        await cache.guardar(clave, cacheado)
+
+    return [s for s in cacheado if datetime.fromisoformat(s["inicio"]) > ahora_utc]
 
 
 @router.get(
@@ -416,24 +438,19 @@ async def disponibilidad_profesional(
     if db.pool is None:
         raise _error(503, "DB_NO_DISPONIBLE", "Pool de base de datos no disponible")
 
-    async with db.pool.connection() as conn:
-        async with conn.cursor() as cur:
-            tz = await _zona_clinica(cur, clinica_id)
-            espacios = await _espacios_profesional(
-                cur=cur,
-                clinica_id=clinica_id,
-                tz=tz,
-                profesional_id=profesional_id,
-                fecha=fecha,
-                servicio_id=servicio_id,
-                ahora_utc=datetime.now(timezone.utc),
-            )
-            return {
-                "profesional_id": profesional_id,
-                "fecha": fecha,
-                "servicio_id": servicio_id,
-                "espacios": espacios,
-            }
+    espacios = await _espacios_profesional(
+        clinica_id=clinica_id,
+        profesional_id=profesional_id,
+        fecha=fecha,
+        servicio_id=servicio_id,
+        ahora_utc=datetime.now(timezone.utc),
+    )
+    return {
+        "profesional_id": profesional_id,
+        "fecha": fecha,
+        "servicio_id": servicio_id,
+        "espacios": espacios,
+    }
 
 
 @router.get(
@@ -454,11 +471,10 @@ async def disponibilidad_por_servicio(
     if (hasta - desde).days > 30:
         raise _error(422, "RANGO_EXCESIVO", "El rango maximo es de 31 dias")
 
+    ahora_utc = datetime.now(timezone.utc)
+
     async with db.pool.connection() as conn:
         async with conn.cursor() as cur:
-            tz = await _zona_clinica(cur, clinica_id)
-            ahora_utc = datetime.now(timezone.utc)
-
             await cur.execute(
                 """
                 SELECT p.profesional_id, p.nombre
@@ -474,36 +490,34 @@ async def disponibilidad_por_servicio(
             )
             candidatos = await cur.fetchall()
 
-            resultado = []
-            for prof in candidatos:
-                dias = []
-                d = desde
-                while d <= hasta:
-                    espacios = await _espacios_profesional(
-                        cur=cur,
-                        clinica_id=clinica_id,
-                        tz=tz,
-                        profesional_id=prof["profesional_id"],
-                        fecha=d,
-                        servicio_id=servicio_id,
-                        ahora_utc=ahora_utc,
-                    )
-                    if espacios:
-                        dias.append({"fecha": d, "espacios": espacios})
-                    d += timedelta(days=1)
+    resultado = []
+    for prof in candidatos:
+        dias = []
+        d = desde
+        while d <= hasta:
+            espacios = await _espacios_profesional(
+                clinica_id=clinica_id,
+                profesional_id=prof["profesional_id"],
+                fecha=d,
+                servicio_id=servicio_id,
+                ahora_utc=ahora_utc,
+            )
+            if espacios:
+                dias.append({"fecha": d, "espacios": espacios})
+            d += timedelta(days=1)
 
-                if dias:
-                    resultado.append(
-                        {
-                            "profesional_id": prof["profesional_id"],
-                            "nombre": prof["nombre"],
-                            "dias": dias,
-                        }
-                    )
+        if dias:
+            resultado.append(
+                {
+                    "profesional_id": prof["profesional_id"],
+                    "nombre": prof["nombre"],
+                    "dias": dias,
+                }
+            )
 
-            return {
-                "servicio_id": servicio_id,
-                "desde": desde,
-                "hasta": hasta,
-                "profesionales": resultado,
-            }
+    return {
+        "servicio_id": servicio_id,
+        "desde": desde,
+        "hasta": hasta,
+        "profesionales": resultado,
+    }
