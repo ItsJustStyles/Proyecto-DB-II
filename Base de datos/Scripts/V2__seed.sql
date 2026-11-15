@@ -2,6 +2,18 @@
 
 DO $$
 DECLARE
+    -- keycloak_sub de cada usuario = "id" del usuario en keycloak/medicitas-realm.json.
+    -- Si cambia el realm, solo hay que ajustar estas constantes.
+    c_sub_plataforma      constant uuid := '00000000-0000-4000-8000-000000000001';  -- plataforma
+    c_sub_admin_norte     constant uuid := '00000000-0000-4000-8000-000000000011';  -- admin1
+    c_sub_recep_norte     constant uuid := '00000000-0000-4000-8000-000000000012';  -- recep1a
+    c_sub_prof_general    constant uuid := '00000000-0000-4000-8000-000000000014';  -- prof1a
+    c_sub_prof_pediatria  constant uuid := '00000000-0000-4000-8000-000000000015';  -- prof1b
+    c_sub_prof_cardio     constant uuid := '00000000-0000-4000-8000-000000000105';  -- SIN usuario en el realm (no puede iniciar sesion)
+    c_sub_admin_sur       constant uuid := '00000000-0000-4000-8000-000000000021';  -- admin2
+    c_sub_recep_sur       constant uuid := '00000000-0000-4000-8000-000000000022';  -- recep2a
+    c_sub_prof_sur        constant uuid := '00000000-0000-4000-8000-000000000024';  -- prof2a
+
     v_esp_general       smallint;
     v_esp_pediatria     smallint;
     v_esp_cardiologia   smallint;
@@ -55,40 +67,40 @@ BEGIN
 
     -- Administrador de plataforma: es el unico usuario sin clinica.
     INSERT INTO usuario (clinica_id, rol_id, keycloak_sub, nombre)
-    VALUES (NULL, 1, '00000000-0000-4000-8000-000000000001', 'Administrador de plataforma')
+    VALUES (NULL, 1, c_sub_plataforma, 'Administrador de plataforma')
     RETURNING usuario_id INTO v_admin_plataforma;
 
     -- Clinica principal de demostracion.
     SELECT crear_clinica(
         'Clinica Demo Norte',
         'America/Costa_Rica',
-        '00000000-0000-4000-8000-000000000101',
+        c_sub_admin_norte,
         'Administrador Demo Norte'
     ) INTO v_clinica_norte;
 
     SELECT usuario_id INTO v_admin_norte
       FROM usuario
      WHERE clinica_id = v_clinica_norte
-       AND keycloak_sub = '00000000-0000-4000-8000-000000000101';
+       AND keycloak_sub = c_sub_admin_norte;
 
     INSERT INTO usuario (clinica_id, rol_id, keycloak_sub, nombre)
     VALUES
-        (v_clinica_norte, 3, '00000000-0000-4000-8000-000000000102', 'Recepcion Demo Norte'),
-        (v_clinica_norte, 4, '00000000-0000-4000-8000-000000000103', 'Profesional General Demo'),
-        (v_clinica_norte, 4, '00000000-0000-4000-8000-000000000104', 'Profesional Pediatria Demo'),
-        (v_clinica_norte, 4, '00000000-0000-4000-8000-000000000105', 'Profesional Cardiologia Demo');
+        (v_clinica_norte, 3, c_sub_recep_norte, 'Recepcion Demo Norte'),
+        (v_clinica_norte, 4, c_sub_prof_general, 'Profesional General Demo'),
+        (v_clinica_norte, 4, c_sub_prof_pediatria, 'Profesional Pediatria Demo'),
+        (v_clinica_norte, 4, c_sub_prof_cardio, 'Profesional Cardiologia Demo');
 
     SELECT usuario_id INTO v_recepcion_norte
-      FROM usuario WHERE keycloak_sub = '00000000-0000-4000-8000-000000000102';
+      FROM usuario WHERE keycloak_sub = c_sub_recep_norte;
 
     SELECT usuario_id INTO v_prof_usuario_1
-      FROM usuario WHERE keycloak_sub = '00000000-0000-4000-8000-000000000103';
+      FROM usuario WHERE keycloak_sub = c_sub_prof_general;
 
     SELECT usuario_id INTO v_prof_usuario_2
-      FROM usuario WHERE keycloak_sub = '00000000-0000-4000-8000-000000000104';
+      FROM usuario WHERE keycloak_sub = c_sub_prof_pediatria;
 
     SELECT usuario_id INTO v_prof_usuario_3
-      FROM usuario WHERE keycloak_sub = '00000000-0000-4000-8000-000000000105';
+      FROM usuario WHERE keycloak_sub = c_sub_prof_cardio;
 
     INSERT INTO profesional (clinica_id, usuario_id, especialidad_id, nombre)
     VALUES
@@ -283,25 +295,25 @@ BEGIN
     SELECT crear_clinica(
         'Clinica Demo Sur',
         'America/Costa_Rica',
-        '00000000-0000-4000-8000-000000000201',
+        c_sub_admin_sur,
         'Administrador Demo Sur'
     ) INTO v_clinica_sur;
 
     SELECT usuario_id INTO v_admin_sur
       FROM usuario
      WHERE clinica_id = v_clinica_sur
-       AND keycloak_sub = '00000000-0000-4000-8000-000000000201';
+       AND keycloak_sub = c_sub_admin_sur;
 
     INSERT INTO usuario (clinica_id, rol_id, keycloak_sub, nombre)
     VALUES
-        (v_clinica_sur, 3, '00000000-0000-4000-8000-000000000202', 'Recepcion Demo Sur'),
-        (v_clinica_sur, 4, '00000000-0000-4000-8000-000000000203', 'Profesional General Demo Sur');
+        (v_clinica_sur, 3, c_sub_recep_sur, 'Recepcion Demo Sur'),
+        (v_clinica_sur, 4, c_sub_prof_sur, 'Profesional General Demo Sur');
 
     SELECT usuario_id INTO v_recepcion_sur
-      FROM usuario WHERE keycloak_sub = '00000000-0000-4000-8000-000000000202';
+      FROM usuario WHERE keycloak_sub = c_sub_recep_sur;
 
     SELECT usuario_id INTO v_prof_usuario_sur
-      FROM usuario WHERE keycloak_sub = '00000000-0000-4000-8000-000000000203';
+      FROM usuario WHERE keycloak_sub = c_sub_prof_sur;
 
     INSERT INTO profesional (clinica_id, usuario_id, especialidad_id, nombre)
     VALUES (
