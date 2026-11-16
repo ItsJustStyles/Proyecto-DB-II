@@ -4,3 +4,5 @@ psycopg[binary]
 psycopg-pool
 redis
 pyjwt[crypto]
+pytest
+httpx

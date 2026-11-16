@@ -74,5 +74,59 @@ services:
         flyway:
           condition: service_completed_successfully
 
+  # Pruebas automatizadas:
+  db_test:
+    image: postgres:16
+    container_name: medicitas_test
+    profiles: ["test"]
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}_test
+    ports:
+      - "5434:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    
+  flyway_test:
+    image: flyway/flyway:latest
+    profiles: ["test"]
+    depends_on:
+      db_test:
+        condition: service_healthy
+    command:
+      - -url=jdbc:postgresql://db_test:5432/${DB_NAME}_test
+      - -user=${DB_USER}
+      - -password=${DB_PASSWORD}
+      - -baselineOnMigrate=true
+      - migrate
+    volumes:
+      - "./Base de datos/Tests:/flyway/sql"
+
+  app_test:
+    build: ./Backend
+    profiles: ["test"]
+    environment:
+      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@db_test:5432/${DB_NAME}_test
+      REDIS_URL: redis://redis:6379/1
+      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS}
+      OIDC_ISSUER: ${KEYCLOAK_PUBLIC_URL}/realms/${KEYCLOAK_REALM}
+      OIDC_JWKS_URL: http://keycloak:8080/realms/${KEYCLOAK_REALM}/protocol/openid-connect/certs
+      OIDC_CLIENT_ID: ${KEYCLOAK_CLIENT_ID}
+    ports:
+      - "8001:8000"
+    depends_on:
+      db_test:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      flyway_test:
+        condition: service_completed_successfully
+
 volumes:
   MediCitasData:
