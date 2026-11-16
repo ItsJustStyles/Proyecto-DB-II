@@ -1,12 +1,21 @@
-"""RF5 a RF8: horarios, bloqueos y disponibilidad (con cache en Redis)."""
+"""RF5 a RF8: horarios, bloqueos y disponibilidad (con cache en Redis y control de permisos)."""
 import os
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Header, HTTPException, Query, Response
-from psycopg import errors as pgerr
+from fastapi import APIRouter, Depends, Query
 
 from .. import cache, db
+from ..auth import requiere
+from ..common import (
+    ahora,
+    error,
+    exigir_profesional_propio,
+    limites_dia,
+    no_encontrado,
+    zona_clinica,
+)
+from ..db import Principal, Tx
 from ..schemas import BloqueoIn, HorarioIn
 
 router = APIRouter(prefix="/api/v1", tags=["agenda"])
@@ -22,30 +31,6 @@ _CONFLICTOS_SQL = """
        AND tstzrange(inicio, fin) && tstzrange(%(i)s, %(f)s)
      ORDER BY inicio
 """
-
-
-def _error(status_code: int, codigo: str, mensaje: str) -> HTTPException:
-    return HTTPException(
-        status_code=status_code,
-        detail={"codigo": codigo, "mensaje": mensaje},
-    )
-
-
-async def _zona_clinica(cur, clinica_id: int) -> ZoneInfo:
-    await cur.execute(
-        "SELECT zona_horaria FROM clinica WHERE clinica_id = %(cid)s",
-        {"cid": clinica_id},
-    )
-    row = await cur.fetchone()
-    if row is None:
-        raise _error(404, "NO_ENCONTRADO", "La clinica no existe")
-    return ZoneInfo(row["zona_horaria"])
-
-
-def _limites_dia(fecha: date, tz: ZoneInfo) -> tuple[datetime, datetime]:
-    ini = datetime.combine(fecha, time.min, tzinfo=tz)
-    fin = datetime.fromtimestamp(ini.timestamp() + 86400, tz=tz)
-    return ini, fin
 
 
 def _calcular_slots(
@@ -92,36 +77,25 @@ def _calcular_slots(
 async def crear_horario(
     profesional_id: int,
     body: HorarioIn,
-    clinica_id: int = Header(..., alias="X-Clinica-Id", description="Temporal mientras se integra Keycloak"),
+    p: Principal = Depends(requiere("horario.gestionar")),
 ):
-    if db.pool is None:
-        raise _error(503, "DB_NO_DISPONIBLE", "Pool de base de datos no disponible")
+    async def work(tx: Tx):
+        await exigir_profesional_propio(tx, profesional_id)
+        row = await tx.one(
+            "INSERT INTO horario_atencion (clinica_id, profesional_id, dia_semana, hora_inicio, hora_fin) "
+            "VALUES (%(clinica_id)s, %(pid)s, %(d)s, %(hi)s, %(hf)s) "
+            "RETURNING horario_id, profesional_id, dia_semana, hora_inicio, hora_fin",
+            {
+                "pid": profesional_id,
+                "d": body.dia_semana,
+                "hi": body.hora_inicio,
+                "hf": body.hora_fin,
+            },
+        )
+        tx.tras_commit(lambda: cache.invalidar_profesional(tx.p.clinica_id, profesional_id))
+        return row
 
-    try:
-        async with db.pool.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    """
-                    INSERT INTO horario_atencion (clinica_id, profesional_id, dia_semana, hora_inicio, hora_fin)
-                    VALUES (%(clinica_id)s, %(pid)s, %(d)s, %(hi)s, %(hf)s)
-                    RETURNING horario_id, profesional_id, dia_semana, hora_inicio, hora_fin
-                    """,
-                    {
-                        "clinica_id": clinica_id,
-                        "pid": profesional_id,
-                        "d": body.dia_semana,
-                        "hi": body.hora_inicio,
-                        "hf": body.hora_fin,
-                    },
-                )
-                row = await cur.fetchone()
-    except pgerr.ExclusionViolation:
-        raise _error(409, "HORARIO_SOLAPADO", "El bloque se solapa con otro horario del profesional en ese dia")
-    except pgerr.ForeignKeyViolation:
-        raise _error(404, "NO_ENCONTRADO", "El profesional no existe en esta clinica")
-
-    await cache.invalidar_profesional(clinica_id, profesional_id)
-    return row
+    return await db.run(p, work)
 
 
 @router.get(
@@ -130,23 +104,18 @@ async def crear_horario(
 )
 async def listar_horarios(
     profesional_id: int,
-    clinica_id: int = Header(..., alias="X-Clinica-Id", description="Temporal mientras se integra Keycloak"),
+    p: Principal = Depends(requiere("agenda.leer_config")),
 ):
-    if db.pool is None:
-        raise _error(503, "DB_NO_DISPONIBLE", "Pool de base de datos no disponible")
+    async def work(tx: Tx):
+        return await tx.fetch(
+            "SELECT horario_id, dia_semana, hora_inicio, hora_fin "
+            "  FROM horario_atencion "
+            " WHERE clinica_id = %(clinica_id)s AND profesional_id = %(pid)s "
+            " ORDER BY dia_semana, hora_inicio",
+            {"pid": profesional_id},
+        )
 
-    async with db.pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT horario_id, dia_semana, hora_inicio, hora_fin
-                  FROM horario_atencion
-                 WHERE clinica_id = %(clinica_id)s AND profesional_id = %(pid)s
-                 ORDER BY dia_semana, hora_inicio
-                """,
-                {"clinica_id": clinica_id, "pid": profesional_id},
-            )
-            return await cur.fetchall()
+    return await db.run(p, work)
 
 
 @router.delete(
@@ -156,27 +125,25 @@ async def listar_horarios(
 )
 async def eliminar_horario(
     horario_id: int,
-    clinica_id: int = Header(..., alias="X-Clinica-Id", description="Temporal mientras se integra Keycloak"),
+    p: Principal = Depends(requiere("horario.gestionar")),
 ):
-    if db.pool is None:
-        raise _error(503, "DB_NO_DISPONIBLE", "Pool de base de datos no disponible")
+    async def work(tx: Tx):
+        actual = await tx.one(
+            "SELECT profesional_id FROM horario_atencion "
+            "WHERE clinica_id = %(clinica_id)s AND horario_id = %(h)s FOR UPDATE",
+            {"h": horario_id},
+        )
+        if actual is None:
+            raise no_encontrado("El horario")
+        await exigir_profesional_propio(tx, actual["profesional_id"])
+        await tx.execute(
+            "DELETE FROM horario_atencion WHERE clinica_id = %(clinica_id)s AND horario_id = %(h)s",
+            {"h": horario_id},
+        )
+        pid = actual["profesional_id"]
+        tx.tras_commit(lambda: cache.invalidar_profesional(tx.p.clinica_id, pid))
 
-    async with db.pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                DELETE FROM horario_atencion
-                 WHERE clinica_id = %(clinica_id)s AND horario_id = %(h)s
-                RETURNING profesional_id
-                """,
-                {"clinica_id": clinica_id, "h": horario_id},
-            )
-            row = await cur.fetchone()
-            if row is None:
-                raise _error(404, "NO_ENCONTRADO", "El horario no existe en esta clinica")
-
-    await cache.invalidar_profesional(clinica_id, row["profesional_id"])
-    return Response(status_code=204)
+    await db.run(p, work)
 
 
 # ---------------------------------------------------------------- RF6 bloqueos
@@ -188,49 +155,31 @@ async def eliminar_horario(
 async def crear_bloqueo(
     profesional_id: int,
     body: BloqueoIn,
-    clinica_id: int = Header(..., alias="X-Clinica-Id", description="Temporal mientras se integra Keycloak"),
-    usuario_id: int = Header(..., alias="X-Usuario-Id", description="Temporal mientras se integra Keycloak"),
+    p: Principal = Depends(requiere("bloqueo.gestionar")),
 ):
-    if db.pool is None:
-        raise _error(503, "DB_NO_DISPONIBLE", "Pool de base de datos no disponible")
+    async def work(tx: Tx):
+        await exigir_profesional_propio(tx, profesional_id)
+        row = await tx.one(
+            "INSERT INTO bloqueo_agenda (clinica_id, profesional_id, inicio, fin, motivo, creado_por) "
+            "VALUES (%(clinica_id)s, %(pid)s, %(i)s, %(f)s, %(m)s, %(u)s) "
+            "RETURNING bloqueo_id, profesional_id, inicio, fin, motivo",
+            {
+                "pid": profesional_id,
+                "i": body.inicio,
+                "f": body.fin,
+                "m": body.motivo,
+                "u": tx.p.usuario_id,
+            },
+        )
+        # El bloqueo no cancela citas; devuelve las ya reservadas en conflicto para reprogramar
+        conflictos = await tx.fetch(
+            _CONFLICTOS_SQL,
+            {"pid": profesional_id, "i": body.inicio, "f": body.fin},
+        )
+        tx.tras_commit(lambda: cache.invalidar_profesional(tx.p.clinica_id, profesional_id))
+        return {**row, "conflictos": conflictos}
 
-    try:
-        async with db.pool.connection() as conn:
-            async with conn.transaction():
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        """
-                        INSERT INTO bloqueo_agenda (clinica_id, profesional_id, inicio, fin, motivo, creado_por)
-                        VALUES (%(clinica_id)s, %(pid)s, %(i)s, %(f)s, %(m)s, %(u)s)
-                        RETURNING bloqueo_id, profesional_id, inicio, fin, motivo
-                        """,
-                        {
-                            "clinica_id": clinica_id,
-                            "pid": profesional_id,
-                            "i": body.inicio,
-                            "f": body.fin,
-                            "m": body.motivo,
-                            "u": usuario_id,
-                        },
-                    )
-                    row = await cur.fetchone()
-
-                    # El bloqueo no cancela citas; devuelve las ya reservadas en conflicto para reprogramar
-                    await cur.execute(
-                        _CONFLICTOS_SQL,
-                        {
-                            "clinica_id": clinica_id,
-                            "pid": profesional_id,
-                            "i": body.inicio,
-                            "f": body.fin,
-                        },
-                    )
-                    conflictos = await cur.fetchall()
-    except pgerr.ForeignKeyViolation:
-        raise _error(404, "REFERENCIA_INVALIDA", "Profesional o usuario inexistente en esta clinica")
-
-    await cache.invalidar_profesional(clinica_id, profesional_id)
-    return {**row, "conflictos": conflictos}
+    return await db.run(p, work)
 
 
 @router.get(
@@ -239,23 +188,18 @@ async def crear_bloqueo(
 )
 async def listar_bloqueos(
     profesional_id: int,
-    clinica_id: int = Header(..., alias="X-Clinica-Id", description="Temporal mientras se integra Keycloak"),
+    p: Principal = Depends(requiere("agenda.leer_config")),
 ):
-    if db.pool is None:
-        raise _error(503, "DB_NO_DISPONIBLE", "Pool de base de datos no disponible")
+    async def work(tx: Tx):
+        return await tx.fetch(
+            "SELECT bloqueo_id, inicio, fin, motivo "
+            "  FROM bloqueo_agenda "
+            " WHERE clinica_id = %(clinica_id)s AND profesional_id = %(pid)s "
+            " ORDER BY inicio",
+            {"pid": profesional_id},
+        )
 
-    async with db.pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT bloqueo_id, inicio, fin, motivo
-                  FROM bloqueo_agenda
-                 WHERE clinica_id = %(clinica_id)s AND profesional_id = %(pid)s
-                 ORDER BY inicio
-                """,
-                {"clinica_id": clinica_id, "pid": profesional_id},
-            )
-            return await cur.fetchall()
+    return await db.run(p, work)
 
 
 @router.get(
@@ -264,35 +208,22 @@ async def listar_bloqueos(
 )
 async def conflictos_bloqueo(
     bloqueo_id: int,
-    clinica_id: int = Header(..., alias="X-Clinica-Id", description="Temporal mientras se integra Keycloak"),
+    p: Principal = Depends(requiere("agenda.leer_config")),
 ):
-    if db.pool is None:
-        raise _error(503, "DB_NO_DISPONIBLE", "Pool de base de datos no disponible")
+    async def work(tx: Tx):
+        b = await tx.one(
+            "SELECT profesional_id, inicio, fin FROM bloqueo_agenda "
+            "WHERE clinica_id = %(clinica_id)s AND bloqueo_id = %(b)s",
+            {"b": bloqueo_id},
+        )
+        if b is None:
+            raise no_encontrado("El bloqueo")
+        return await tx.fetch(
+            _CONFLICTOS_SQL,
+            {"pid": b["profesional_id"], "i": b["inicio"], "f": b["fin"]},
+        )
 
-    async with db.pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT profesional_id, inicio, fin
-                  FROM bloqueo_agenda
-                 WHERE clinica_id = %(clinica_id)s AND bloqueo_id = %(b)s
-                """,
-                {"clinica_id": clinica_id, "b": bloqueo_id},
-            )
-            b = await cur.fetchone()
-            if b is None:
-                raise _error(404, "NO_ENCONTRADO", "El bloqueo no existe en esta clinica")
-
-            await cur.execute(
-                _CONFLICTOS_SQL,
-                {
-                    "clinica_id": clinica_id,
-                    "pid": b["profesional_id"],
-                    "i": b["inicio"],
-                    "f": b["fin"],
-                },
-            )
-            return await cur.fetchall()
+    return await db.run(p, work)
 
 
 @router.delete(
@@ -302,124 +233,108 @@ async def conflictos_bloqueo(
 )
 async def eliminar_bloqueo(
     bloqueo_id: int,
-    clinica_id: int = Header(..., alias="X-Clinica-Id", description="Temporal mientras se integra Keycloak"),
+    p: Principal = Depends(requiere("bloqueo.gestionar")),
 ):
-    if db.pool is None:
-        raise _error(503, "DB_NO_DISPONIBLE", "Pool de base de datos no disponible")
+    async def work(tx: Tx):
+        actual = await tx.one(
+            "SELECT profesional_id FROM bloqueo_agenda "
+            "WHERE clinica_id = %(clinica_id)s AND bloqueo_id = %(b)s FOR UPDATE",
+            {"b": bloqueo_id},
+        )
+        if actual is None:
+            raise no_encontrado("El bloqueo")
+        await exigir_profesional_propio(tx, actual["profesional_id"])
+        await tx.execute(
+            "DELETE FROM bloqueo_agenda WHERE clinica_id = %(clinica_id)s AND bloqueo_id = %(b)s",
+            {"b": bloqueo_id},
+        )
+        pid = actual["profesional_id"]
+        tx.tras_commit(lambda: cache.invalidar_profesional(tx.p.clinica_id, pid))
 
-    async with db.pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                DELETE FROM bloqueo_agenda
-                 WHERE clinica_id = %(clinica_id)s AND bloqueo_id = %(b)s
-                RETURNING profesional_id
-                """,
-                {"clinica_id": clinica_id, "b": bloqueo_id},
-            )
-            row = await cur.fetchone()
-            if row is None:
-                raise _error(404, "NO_ENCONTRADO", "El bloqueo no existe en esta clinica")
-
-    await cache.invalidar_profesional(clinica_id, row["profesional_id"])
-    return Response(status_code=204)
+    await db.run(p, work)
 
 
 # ---------------------------------------------------------------- RF7 / RF8 disponibilidad
 async def _espacios_profesional(
-    clinica_id: int,
+    p: Principal,
     profesional_id: int,
     fecha: date,
     servicio_id: int,
     ahora_utc: datetime,
 ) -> list[dict]:
+    assert p.clinica_id is not None
     # 1) Leer versiones y buscar en Redis ANTES de consultar PostgreSQL (I8)
-    cacheado, clave = await cache.leer(clinica_id, profesional_id, fecha.isoformat(), servicio_id)
+    cacheado, clave = await cache.leer(p.clinica_id, profesional_id, fecha.isoformat(), servicio_id)
 
     if cacheado is None:
-        async with db.pool.connection() as conn:
-            async with conn.cursor() as cur:
-                tz = await _zona_clinica(cur, clinica_id)
+        async def work(tx: Tx):
+            tz = await zona_clinica(tx)
+            prof = await tx.one(
+                "SELECT activo FROM profesional WHERE clinica_id = %(clinica_id)s AND profesional_id = %(pid)s",
+                {"pid": profesional_id},
+            )
+            if prof is None:
+                raise no_encontrado("El profesional")
 
-                await cur.execute(
-                    "SELECT activo FROM profesional WHERE clinica_id = %(clinica_id)s AND profesional_id = %(pid)s",
-                    {"clinica_id": clinica_id, "pid": profesional_id},
-                )
-                prof = await cur.fetchone()
-                if prof is None:
-                    raise _error(404, "NO_ENCONTRADO", "El profesional no existe en esta clinica")
+            serv = await tx.one(
+                "SELECT s.duracion_min, s.activo "
+                "  FROM servicio s "
+                "  JOIN profesional_servicio ps "
+                "    ON ps.clinica_id = s.clinica_id AND ps.servicio_id = s.servicio_id "
+                " WHERE s.clinica_id = %(clinica_id)s "
+                "   AND s.servicio_id = %(sid)s "
+                "   AND ps.profesional_id = %(pid)s",
+                {"sid": servicio_id, "pid": profesional_id},
+            )
+            if serv is None:
+                raise error(422, "SERVICIO_NO_HABILITADO", "El profesional no atiende ese servicio en esta clinica")
 
-                await cur.execute(
-                    """
-                    SELECT s.duracion_min, s.activo
-                      FROM servicio s
-                      JOIN profesional_servicio ps
-                        ON ps.clinica_id = s.clinica_id AND ps.servicio_id = s.servicio_id
-                     WHERE s.clinica_id = %(clinica_id)s
-                       AND s.servicio_id = %(sid)s
-                       AND ps.profesional_id = %(pid)s
-                    """,
-                    {"clinica_id": clinica_id, "sid": servicio_id, "pid": profesional_id},
-                )
-                serv = await cur.fetchone()
-                if serv is None:
-                    raise _error(422, "SERVICIO_NO_HABILITADO", "El profesional no atiende ese servicio en esta clinica")
+            if not prof["activo"] or not serv["activo"]:
+                return []
 
-                if not prof["activo"] or not serv["activo"]:
-                    cacheado = []
-                else:
-                    ini_dia, fin_dia = _limites_dia(fecha, tz)
+            ini_dia, fin_dia = limites_dia(fecha, tz)
 
-                    await cur.execute(
-                        """
-                        SELECT hora_inicio, hora_fin
-                          FROM horario_atencion
-                         WHERE clinica_id = %(clinica_id)s
-                           AND profesional_id = %(pid)s
-                           AND dia_semana = %(dow)s
-                         ORDER BY hora_inicio
-                        """,
-                        {"clinica_id": clinica_id, "pid": profesional_id, "dow": fecha.isoweekday()},
-                    )
-                    bloques = await cur.fetchall()
+            bloques = await tx.fetch(
+                "SELECT hora_inicio, hora_fin "
+                "  FROM horario_atencion "
+                " WHERE clinica_id = %(clinica_id)s "
+                "   AND profesional_id = %(pid)s "
+                "   AND dia_semana = %(dow)s "
+                " ORDER BY hora_inicio",
+                {"pid": profesional_id, "dow": fecha.isoweekday()},
+            )
 
-                    await cur.execute(
-                        """
-                        SELECT inicio, fin
-                          FROM cita
-                         WHERE clinica_id = %(clinica_id)s
-                           AND profesional_id = %(pid)s
-                           AND estado_id = 1
-                           AND inicio < %(fd)s AND fin > %(id)s
-                        """,
-                        {"clinica_id": clinica_id, "pid": profesional_id, "id": ini_dia, "fd": fin_dia},
-                    )
-                    ocupados = await cur.fetchall()
+            ocupados = await tx.fetch(
+                "SELECT inicio, fin "
+                "  FROM cita "
+                " WHERE clinica_id = %(clinica_id)s "
+                "   AND profesional_id = %(pid)s "
+                "   AND estado_id = 1 "
+                "   AND inicio < %(fd)s AND fin > %(id)s",
+                {"pid": profesional_id, "id": ini_dia, "fd": fin_dia},
+            )
 
-                    await cur.execute(
-                        """
-                        SELECT inicio, fin
-                          FROM bloqueo_agenda
-                         WHERE clinica_id = %(clinica_id)s
-                           AND profesional_id = %(pid)s
-                           AND tstzrange(inicio, fin) && tstzrange(%(id)s, %(fd)s)
-                        """,
-                        {"clinica_id": clinica_id, "pid": profesional_id, "id": ini_dia, "fd": fin_dia},
-                    )
-                    bloqueos = await cur.fetchall()
+            bloqueos = await tx.fetch(
+                "SELECT inicio, fin "
+                "  FROM bloqueo_agenda "
+                " WHERE clinica_id = %(clinica_id)s "
+                "   AND profesional_id = %(pid)s "
+                "   AND tstzrange(inicio, fin) && tstzrange(%(id)s, %(fd)s)",
+                {"pid": profesional_id, "id": ini_dia, "fd": fin_dia},
+            )
 
-                    # Se guarda el dia completo en cache; el filtro de espacios pasados se aplica al servir
-                    cacheado = _calcular_slots(
-                        fecha=fecha,
-                        tz=tz,
-                        bloques=[(b["hora_inicio"], b["hora_fin"]) for b in bloques],
-                        duracion_min=serv["duracion_min"],
-                        ocupados=[(o["inicio"], o["fin"]) for o in ocupados],
-                        bloqueos=[(b["inicio"], b["fin"]) for b in bloqueos],
-                        ahora_utc=datetime(1970, 1, 1, tzinfo=timezone.utc),
-                        paso_min=_SLOT_STEP_MIN,
-                    )
+            return _calcular_slots(
+                fecha=fecha,
+                tz=tz,
+                bloques=[(b["hora_inicio"], b["hora_fin"]) for b in bloques],
+                duracion_min=serv["duracion_min"],
+                ocupados=[(o["inicio"], o["fin"]) for o in ocupados],
+                bloqueos=[(b["inicio"], b["fin"]) for b in bloqueos],
+                ahora_utc=datetime(1970, 1, 1, tzinfo=timezone.utc),
+                paso_min=_SLOT_STEP_MIN,
+            )
 
+        cacheado = await db.run(p, work)
         await cache.guardar(clave, cacheado)
 
     return [s for s in cacheado if datetime.fromisoformat(s["inicio"]) > ahora_utc]
@@ -433,17 +348,14 @@ async def disponibilidad_profesional(
     profesional_id: int,
     fecha: date,
     servicio_id: int,
-    clinica_id: int = Header(..., alias="X-Clinica-Id", description="Temporal mientras se integra Keycloak"),
+    p: Principal = Depends(requiere("disponibilidad.consultar")),
 ):
-    if db.pool is None:
-        raise _error(503, "DB_NO_DISPONIBLE", "Pool de base de datos no disponible")
-
     espacios = await _espacios_profesional(
-        clinica_id=clinica_id,
+        p=p,
         profesional_id=profesional_id,
         fecha=fecha,
         servicio_id=servicio_id,
-        ahora_utc=datetime.now(timezone.utc),
+        ahora_utc=ahora(),
     )
     return {
         "profesional_id": profesional_id,
@@ -461,34 +373,29 @@ async def disponibilidad_por_servicio(
     servicio_id: int,
     desde: date,
     hasta: date,
-    clinica_id: int = Header(..., alias="X-Clinica-Id", description="Temporal mientras se integra Keycloak"),
+    p: Principal = Depends(requiere("disponibilidad.consultar")),
 ):
-    if db.pool is None:
-        raise _error(503, "DB_NO_DISPONIBLE", "Pool de base de datos no disponible")
-
     if hasta < desde:
-        raise _error(422, "RANGO_INVALIDO", "'hasta' debe ser mayor o igual que 'desde'")
+        raise error(422, "RANGO_INVALIDO", "'hasta' debe ser mayor o igual que 'desde'")
     if (hasta - desde).days > 30:
-        raise _error(422, "RANGO_EXCESIVO", "El rango maximo es de 31 dias")
+        raise error(422, "RANGO_EXCESIVO", "El rango maximo es de 31 dias")
 
-    ahora_utc = datetime.now(timezone.utc)
+    ahora_utc = ahora()
 
-    async with db.pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT p.profesional_id, p.nombre
-                  FROM profesional p
-                  JOIN profesional_servicio ps
-                    ON ps.clinica_id = p.clinica_id AND ps.profesional_id = p.profesional_id
-                 WHERE p.clinica_id = %(clinica_id)s
-                   AND p.activo
-                   AND ps.servicio_id = %(sid)s
-                 ORDER BY p.profesional_id
-                """,
-                {"clinica_id": clinica_id, "sid": servicio_id},
-            )
-            candidatos = await cur.fetchall()
+    async def obtener_candidatos(tx: Tx):
+        return await tx.fetch(
+            "SELECT p.profesional_id, p.nombre "
+            "  FROM profesional p "
+            "  JOIN profesional_servicio ps "
+            "    ON ps.clinica_id = p.clinica_id AND ps.profesional_id = p.profesional_id "
+            " WHERE p.clinica_id = %(clinica_id)s "
+            "   AND p.activo "
+            "   AND ps.servicio_id = %(sid)s "
+            " ORDER BY p.profesional_id",
+            {"sid": servicio_id},
+        )
+
+    candidatos = await db.run(p, obtener_candidatos)
 
     resultado = []
     for prof in candidatos:
@@ -496,7 +403,7 @@ async def disponibilidad_por_servicio(
         d = desde
         while d <= hasta:
             espacios = await _espacios_profesional(
-                clinica_id=clinica_id,
+                p=p,
                 profesional_id=prof["profesional_id"],
                 fecha=d,
                 servicio_id=servicio_id,
