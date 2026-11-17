@@ -949,7 +949,7 @@ La suite vive en `tests/` (`tests/unit/` para las unitarias y `tests/unit/integr
 Con la pila arriba y el servicio de pruebas `app_test` (perfil `test` de Compose) levantado, desde la raíz del repositorio:
 
 ```bash
-docker compose --profile test exec app_test pytest -v -s
+docker compose --profile test up -d --build app_test
 ```
 
 Es un único comando, sin preparación manual de datos: las pruebas parten de los datos semilla de `V2__seed.sql` y obtienen sus propios tokens de Keycloak. La opción `-v` lista cada prueba y `-s` deja ver la salida de la medición de latencia de la caché.
