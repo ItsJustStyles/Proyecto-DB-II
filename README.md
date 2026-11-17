@@ -314,40 +314,60 @@ Los tokens duran 30 minutos. En Swagger UI (`/docs`), el botón **Authorize** ac
 
 ```text
 Proyecto-DB-II/
-├── docker-compose.yml          # Orquestación: db, redis, flyway, keycloak, app
-├── .env.example                # Plantilla de variables de entorno
+├── docker-compose.yml              # Orquestación: db, redis, flyway, keycloak, app y perfil test
+├── .env.example                    # Plantilla de variables de entorno
 ├── README.md
 ├── Backend/
 │   ├── Dockerfile
 │   ├── requirements.txt
-│   └── app/
-│       ├── main.py             # Aplicación FastAPI, ciclo de vida y manejo global de errores
-│       ├── config.py           # Configuración desde variables de entorno
-│       ├── auth.py             # Validación del token OIDC y dependencia de permisos
-│       ├── permisos.py         # Matriz de permisos y mapeo rol → rol de base de datos
-│       ├── tenancy.py          # Guarda de aislamiento entre clínicas (I5)
-│       ├── db.py               # Pool, transacciones, reintentos y traducción de errores del motor
-│       ├── cache.py            # Caché de disponibilidad en Redis
-│       ├── common.py           # Utilidades compartidas y auditoría
-│       ├── schemas.py          # Modelos de entrada (Pydantic)
-│       └── routers/
-│           ├── admin.py        # RF1–RF4: clínicas, usuarios, servicios, profesionales
-│           ├── agenda.py       # RF5–RF8: horarios, bloqueos, disponibilidad
-│           ├── citas.py        # RF9–RF13, RF20, RF21: ciclo de vida de la cita
-│           ├── pacientes.py    # RF14, RF16: pacientes e historial
-│           ├── notas.py        # RF15: notas clínicas
-│           └── auditoria.py    # RF19: consulta de la bitácora
+│   ├── pytest.ini                  # Configuración de Pytest y marcadores
+│   ├── app/
+│   │   ├── main.py                 # Aplicación FastAPI, ciclo de vida y manejo global de errores
+│   │   ├── config.py               # Configuración desde variables de entorno
+│   │   ├── auth.py                 # Validación del token OIDC y dependencia de permisos
+│   │   ├── permisos.py             # Matriz de permisos y mapeo rol → rol de base de datos
+│   │   ├── tenancy.py              # Guarda de aislamiento entre clínicas (I5)
+│   │   ├── db.py                   # Pool, transacciones, reintentos y traducción de errores del motor
+│   │   ├── cache.py                # Caché de disponibilidad en Redis
+│   │   ├── common.py               # Utilidades compartidas y auditoría
+│   │   ├── schemas.py              # Modelos de entrada (Pydantic)
+│   │   └── routers/
+│   │       ├── admin.py            # RF1–RF4: clínicas, usuarios, servicios, profesionales
+│   │       ├── agenda.py           # RF5–RF8: horarios, bloqueos, disponibilidad
+│   │       ├── citas.py            # RF9–RF13, RF20, RF21: ciclo de vida de la cita
+│   │       ├── pacientes.py        # RF14, RF16: pacientes e historial
+│   │       ├── notas.py            # RF15: notas clínicas
+│   │       └── auditoria.py        # RF19: consulta de la bitácora
+│   └── tests/
+│       └── unit/
+│           ├── __init__.py
+│           ├── test_permisos.py    # Pruebas unitarias de la matriz de permisos por rol
+│           ├── test_slots.py       # Pruebas unitarias del cálculo de bloques disponibles
+│           ├── test_tenancy.py     # Pruebas unitarias de los guardas de aislamiento (I5)
+│           └── integration/
+│               ├── __init__.py
+│               ├── conftest.py                     # Fixtures y clientes HTTP autenticados contra Keycloak
+│               ├── test_aislamiento.py             # I5: intentos deliberados de fuga entre clínicas
+│               ├── test_auditoria.py               # I6 / RF18–RF19: bitácora append-only y auditoría
+│               ├── test_cache.py                   # I7 / I8: coherencia e invalidación de caché Redis
+│               ├── test_cache_disponibilidad.py    # I8: reprogramación, cambios de horario y benchmark
+│               ├── test_carrera.py                 # I1: concurrencia y carrera por el último espacio
+│               ├── test_ciclo_cita.py              # RF9–RF13, I2, I4, I7: ciclo de vida y estados
+│               ├── test_horarios_bloqueos.py       # I3 / RF5–RF6: horarios semanales, bloqueos y conflictos
+│               ├── test_identidad.py               # RF17: validación OIDC (401/403/200) y manejo de errores
+│               ├── test_motor.py                   # I5 / I6: roles de mínimo privilegio, FKs y triggers en BD
+│               └── test_servicios_duracion.py      # I4 / RF3: duración de cita fijada por el servicio
 ├── Base de datos/
 │   ├── Scripts/
-│   │   ├── V1__init.sql        # Esquema, índices, triggers, roles de BD y catálogos
-│   │   └── V2__seed.sql        # Datos semilla
-│   └── Markdowns/              # Diccionario de datos y diseño de la base
-├── Decisiones/                 # Comparación de estrategias de multi-tenancy y decisión
+│   │   ├── V1__init.sql            # Esquema, índices, triggers, roles de BD y catálogos
+│   │   └── V2__seed.sql            # Datos semilla
+│   ├── Tests/                      # Migraciones y semilla aislada para db_test
+│   └── Markdowns/                  # Diccionario de datos y diseño de la base
+├── Decisiones/                     # Comparación de estrategias de multi-tenancy y decisión
 ├── keycloak/
-│   ├── medicitas-realm.json    # Realm versionado: roles, client y usuarios de prueba
-│   └── guia.md                 # Cómo obtener un token
-├── Documentos/                 # Enunciado de la Etapa 1
-└── tests/                      # _Pendiente: pruebas unitarias y de integración_
+│   ├── medicitas-realm.json        # Realm versionado: roles, client y usuarios de prueba
+│   └── guia.md                     # Cómo obtener un token
+└── Documentos/                     # Enunciado de la Etapa 1
 ```
 
 ---
@@ -571,7 +591,7 @@ La consulta de espacios (RF7) es la más frecuente, por lo que se sirve desde Re
 | Falla de Redis | Se responde desde la base: la caché nunca puede dar una respuesta falsa. |
 | Filtrado temporal | El resultado se cachea sin depender de la hora actual; los espacios ya pasados se descartan al servir la respuesta. |
 
-**Medición antes y después de introducir la caché:** _Pendiente — ver [§14.5](#145-medición-de-la-caché)._
+**Medición antes y después de introducir la caché:** ver [§14.5](#145-medición-de-la-caché)._
 
 ### 10.4 Protección de datos y auditoría
 
@@ -633,7 +653,7 @@ Cada índice sirve una consulta concreta. Las *exclusion constraints* de `cita` 
 | `ix_bitacora_paciente` | `bitacora_auditoria` | `(clinica_id, paciente_id)` | Bitácora por paciente (RF19) |
 | `ix_bitacora_usuario` | `bitacora_auditoria` | `(clinica_id, usuario_id)` | Bitácora por usuario (RF19) |
 
-**Plan de ejecución que justifica los índices (`EXPLAIN ANALYZE` de RF7):** _Pendiente — ver [§14.6](#146-índices-y-planes-de-ejecución)._
+**Plan de ejecución que justifica los índices (`EXPLAIN ANALYZE` de RF7):** _ver [§14.6](#146-índices-y-planes-de-ejecución)._
 
 ---
 
@@ -864,45 +884,45 @@ Las operaciones de lectura de apoyo (catálogos, agenda del día, detalle de cit
 
 ## 13. Requisitos funcionales e invariantes: trazabilidad
 
-### 13.1 Requisitos funcionales → implementación → prueba
 
+## A. §13.1 Requisitos funcionales (reemplazar la tabla completa)
+ 
 | RF | Descripción | Implementación | Prueba(s) | Estado |
 |---|---|---|---|---|
-| RF1 | Alta de clínica con su primer administrador | `POST /clinicas` · función `crear_clinica` | _Pendiente_ | ⏳ |
-| RF2 | Gestión de usuarios (alta, baja lógica, rol) | `POST/GET/PATCH /usuarios` | _Pendiente_ | ⏳ |
-| RF3 | Catálogo de servicios | `POST/GET/PATCH /servicios` | _Pendiente_ | ⏳ |
-| RF4 | Profesionales y servicios habilitados | `/profesionales` y `/profesionales/{id}/servicios` | _Pendiente_ | ⏳ |
-| RF5 | Horario semanal (varios bloques por día) | `/profesionales/{id}/horarios` · `/horarios/{id}` | _Pendiente_ | ⏳ |
-| RF6 | Bloqueos de agenda y conflictos | `/profesionales/{id}/bloqueos` · `/bloqueos/{id}/conflictos` | _Pendiente_ | ⏳ |
-| RF7 | Espacios disponibles de un profesional en una fecha | `GET /profesionales/{id}/disponibilidad` | _Pendiente_ | ⏳ |
-| RF8 | Disponibilidad por servicio en un rango | `GET /disponibilidad` | _Pendiente_ | ⏳ |
-| RF9 | Reservar una cita | `POST /citas` | _Pendiente_ | ⏳ |
-| RF10 | Reprogramar atómicamente | `POST /citas/{id}/reprogramar` | _Pendiente_ | ⏳ |
-| RF11 | Cancelar con motivo y usuario | `POST /citas/{id}/cancelar` | _Pendiente_ | ⏳ |
-| RF12 | Registrar desenlace (solo pasada la hora) | `POST /citas/{id}/desenlace` | _Pendiente_ | ⏳ |
-| RF13 | Máquina de estados | Trigger `trg_cita_transicion_estado` | _Pendiente_ | ⏳ |
-| RF14 | Registrar y actualizar pacientes | `/pacientes` | _Pendiente_ | ⏳ |
-| RF15 | Nota clínica | `/citas/{id}/nota` | _Pendiente_ | ⏳ |
-| RF16 | Historial del paciente | `GET /pacientes/{id}/citas` | _Pendiente_ | ⏳ |
-| RF17 | Autenticación externa y autorización por rol | `auth.py` · `permisos.py` · Keycloak | _Pendiente_ | ⏳ |
-| RF18 | Bitácora *append-only* de accesos | `common.auditar` · triggers y privilegios | _Pendiente_ | ⏳ |
-| RF19 | Consulta de bitácora con filtros | `GET /bitacora` | _Pendiente_ | ⏳ |
-| RF20 | Agenda del día (profesional y clínica) | `GET /agenda` | _Pendiente_ | ⏳ |
+| RF1 | Alta de clínica con su primer administrador | `POST /clinicas` · función `crear_clinica` | Solo el `403` de roles no autorizados: `test_identidad::test_rol_incorrecto_es_403` | ⚠️ parcial |
+| RF2 | Gestión de usuarios (alta, baja lógica, rol) | `POST/GET/PATCH /usuarios` | Solo el listado: `test_identidad::test_rol_correcto_funciona` | ⚠️ parcial |
+| RF3 | Catálogo de servicios | `POST/GET/PATCH /servicios` | `test_servicios_duracion::test_cambiar_duracion_servicio_no_altera_citas_ya_agendadas` (modificación) | ⚠️ parcial |
+| RF4 | Profesionales y servicios habilitados | `/profesionales` y `/profesionales/{id}/servicios` | Listado usado por `conftest::datos_clinica` | ⚠️ parcial |
+| RF5 | Horario semanal (varios bloques por día) | `/profesionales/{id}/horarios` · `/horarios/{id}` | `test_horarios_bloqueos::test_eliminar_horario_impide_reservar_en_esa_franja` · `test_cache_disponibilidad::test_cambio_horario_semanal_invalida_cache_del_profesional` | ✅ |
+| RF6 | Bloqueos de agenda y conflictos | `/profesionales/{id}/bloqueos` · `/bloqueos/{id}/conflictos` | `test_horarios_bloqueos::test_bloqueo_lista_citas_en_conflicto_sin_cancelarlas` · `test_reserva_dentro_de_bloqueo_es_rechazada` | ✅ |
+| RF7 | Espacios disponibles de un profesional en una fecha | `GET /profesionales/{id}/disponibilidad` | `test_slots` (8 unitarias) · `test_cache::test_reserva_invalida_la_cache_de_inmediato` · `test_cache_disponibilidad::test_medicion_latencia_antes_y_despues_de_cache` | ✅ |
+| RF8 | Disponibilidad por servicio en un rango | `GET /disponibilidad` | `test_cache::test_disponibilidad_por_servicio_en_rango` | ✅ |
+| RF9 | Reservar una cita | `POST /citas` | `test_ciclo_cita::test_reservar_concedida_y_duracion_la_fija_el_servicio` · `test_reserva_invalida_es_422` · `test_espacio_ya_tomado_es_409` · `test_carrera` | ✅ |
+| RF10 | Reprogramar atómicamente | `POST /citas/{id}/reprogramar` | `test_ciclo_cita::test_reprogramar_cancelar_y_estados_finales` · `test_reprogramar_a_espacio_ocupado_deja_la_original_intacta` · `test_carrera::test_reprogramaciones_concurrentes_de_la_misma_cita` | ✅ |
+| RF11 | Cancelar con motivo y usuario | `POST /citas/{id}/cancelar` | `test_ciclo_cita::test_reprogramar_cancelar_y_estados_finales` | ✅ |
+| RF12 | Registrar desenlace (solo pasada la hora) | `POST /citas/{id}/desenlace` | `test_ciclo_cita::test_desenlace_solo_tras_la_hora_de_inicio` · `test_desenlace_de_cita_pasada_y_estado_final` · `test_profesional_registra_desenlace_solo_de_sus_citas` | ✅ |
+| RF13 | Máquina de estados | Trigger `trg_cita_transicion_estado` | `test_motor::test_trigger_rechaza_transicion_desde_estado_final` · `test_ciclo_cita` (estados finales) | ✅ |
+| RF14 | Registrar y actualizar pacientes | `/pacientes` | `test_aislamiento::test_clinica_id_en_el_cuerpo_no_tiene_efecto` (alta) · `test_auditoria::test_lectura_y_actualizacion_de_paciente_registran_auditoria` (actualización) | ✅ |
+| RF15 | Nota clínica | `/citas/{id}/nota` | `test_motor::test_nota_solo_en_cita_atendida_y_del_profesional_de_la_cita` · `test_auditoria::test_lectura_de_nota_clinica_registra_auditoria` (lectura) | ⚠️ parcial |
+| RF16 | Historial del paciente | `GET /pacientes/{id}/citas` | `test_aislamiento::test_acceso_directo_por_id_ajeno_es_404` · `test_ciclo_cita::test_desenlace_de_cita_pasada_y_estado_final` | ✅ |
+| RF17 | Autenticación externa y autorización por rol | `auth.py` · `permisos.py` · Keycloak | `test_identidad` (6) · `test_permisos` (27) | ✅ |
+| RF18 | Bitácora *append-only* de accesos | `common.auditar` · triggers y privilegios | `test_auditoria` (3) · `test_motor` | ✅ |
+| RF19 | Consulta de bitácora con filtros | `GET /bitacora` | `test_auditoria::test_filtros_bitacora_y_rutas_inmutables_en_api` · `test_aislamiento::test_bitacora_solo_muestra_la_propia_clinica` | ✅ |
+| RF20 | Agenda del día (profesional y clínica) | `GET /agenda` | `test_carrera` (cuenta las citas vigentes por la agenda) | ✅ |
 | RF21 | Conteo de citas por estado | `GET /citas/conteo/por-estado` | _Pendiente_ | ⏳ |
-
-### 13.2 Invariantes → mecanismo → prueba
-
+ 
+## B. §13.2 Invariantes (reemplazar la tabla completa)
+ 
 | Invariante | Mecanismo | Prueba(s) | Estado |
 |---|---|---|---|
-| I1 · Sin solape de citas del profesional | Exclusion constraint | _Pendiente_ (incluye la prueba de carrera) | ⏳ |
-| I2 · Sin solape de citas del paciente | Exclusion constraint | _Pendiente_ | ⏳ |
-| I3 · Dentro del horario y fuera de bloqueos | Trigger `trg_cita_valida_agenda` | _Pendiente_ | ⏳ |
-| I4 · Duración fijada por el servicio | Trigger `trg_cita_fin_por_servicio` | _Pendiente_ | ⏳ |
-| I5 · Aislamiento entre clínicas | Identidad + guarda + FK compuestas + roles | _Pendiente_ (pruebas de fuga) | ⏳ |
-| I6 · Bitácora inmutable | Privilegios + triggers | _Pendiente_ | ⏳ |
-| I7 · Liberación inmediata del espacio | Estado + invalidación tras *commit* | _Pendiente_ | ⏳ |
-| I8 · Disponibilidad coherente con la base | Invalidación por versión | _Pendiente_ | ⏳ |
-
+| I1 · Sin solape de citas del profesional | Exclusion constraint | `test_carrera` (3 pruebas: 10 rondas con 2 clientes, 8 clientes simultáneos, reprogramaciones concurrentes) | ✅ |
+| I2 · Sin solape de citas del paciente | Exclusion constraint | `test_ciclo_cita::test_paciente_no_puede_tener_dos_citas_solapadas_I2` | ✅ |
+| I3 · Dentro del horario y fuera de bloqueos | Trigger `trg_cita_valida_agenda` | `test_horarios_bloqueos` (4) · `test_ciclo_cita::test_reserva_invalida_es_422` | ✅ |
+| I4 · Duración fijada por el servicio | Trigger `trg_cita_fin_por_servicio` | `test_servicios_duracion` (2) · `test_ciclo_cita::test_reservar_concedida_y_duracion_la_fija_el_servicio` | ✅ |
+| I5 · Aislamiento entre clínicas | Identidad + guarda + FK compuestas + roles | `test_aislamiento` (7) · `test_tenancy` (4) · `test_motor` (FK compuesta, `clinica_id` inmutable) | ✅ |
+| I6 · Bitácora inmutable | Privilegios + triggers | `test_motor` (bitácora, 9 combinaciones + lectura) · `test_auditoria::test_filtros_bitacora_y_rutas_inmutables_en_api` | ✅ |
+| I7 · Liberación inmediata del espacio | Estado + invalidación tras *commit* | `test_cache::test_cancelar_libera_el_espacio_de_inmediato` · `test_ciclo_cita::test_reprogramar_cancelar_y_estados_finales` | ✅ |
+| I8 · Disponibilidad coherente con la base | Invalidación por versión | `test_cache` (4) · `test_cache_disponibilidad` (3) | ✅ |
 ---
 
 ## 14. Criterios de aceptación
@@ -1107,35 +1127,61 @@ La prueba `test_cache_disponibilidad::test_medicion_latencia_antes_y_despues_de_
 | Mediana de los 30 *hits* (ms) | — | 3.57 | −66 % (≈ 3.0× más rápido, frente al *miss*) |
 
 Metodología: se elige un día hábil a 60 días, que ninguna prueba consulta, para forzar un *miss* real (consulta a PostgreSQL, cálculo de espacios y escritura en Redis). Luego se hacen 30 consultas idénticas servidas desde Redis y se verifica que todas devuelven los mismos espacios que el *miss*. La latencia se mide por HTTP desde el cliente de pruebas, por lo que incluye la validación del token y la resolución de la identidad, además del acceso al dato. Se reporta el promedio y la mediana de los *hits* frente a un único *miss*. La medición se hizo en una máquina de desarrollo con Docker en Windows y con los datos semilla, que son pocos; los valores absolutos varían entre corridas y la diferencia debería crecer con más datos, porque el *miss* cuesta más cuanto más citas haya que leer y el *hit* no.
-
 ### 15.6 Índices y planes de ejecución
 
-Cada índice se justifica con el plan de la consulta que pretende servir, empezando por RF7. Para obtener los planes:
+Cada índice se justifica con el plan de la consulta que pretende servir, empezando por RF7. Los planes se obtuvieron con `EXPLAIN (ANALYZE, BUFFERS)` sobre un volumen de prueba cargado **dentro de una transacción que termina en `ROLLBACK`**, de modo que la base queda intacta. El script completo está en [`Base de datos/Scripts/explain_indices.sql`](Base%20de%20datos/Scripts/explain_indices.sql).
 
 ```bash
-docker compose exec db psql -U MediCitas -d MediCitas
+# Bash
+docker compose exec -T db psql -U MediCitas -d MediCitas < "Base de datos/Scripts/explain_indices.sql"
 ```
 
+```powershell
+# PowerShell
+Get-Content "Base de datos/Scripts/explain_indices.sql" -Raw | docker compose exec -T db psql -U MediCitas -d MediCitas
+```
+
+**Volumen de prueba** (todo en la Clínica 1, seguido de `ANALYZE`):
+
+| Tabla | Filas añadidas | Características |
+|---|---:|---|
+| `cita` | 10 000 | Estado `ATENDIDA` (2), una cada hora desde 2025-01-01, todas del mismo paciente y del mismo profesional |
+| `bloqueo_agenda` | 3 000 | Un bloqueo de una hora por día, del mismo profesional |
+| `bitacora_auditoria` | 15 000 | Registros `LECTURA` sobre el mismo paciente |
+
+Las citas se cargaron como atendidas porque una cita vigente tendría que cumplir el horario del profesional (I3) y no solaparse con otra (I1 e I2).
+
+**Consulta de RF7 (citas vigentes de un profesional en un día):**
+
 ```sql
--- RF7: citas vigentes de un profesional en un día
 EXPLAIN (ANALYZE, BUFFERS)
 SELECT inicio, fin
   FROM cita
  WHERE clinica_id = 1
-   AND profesional_id = 1
+   AND profesional_id = (SELECT profesional_id FROM profesional WHERE clinica_id = 1 LIMIT 1)
    AND estado_id = 1
    AND inicio < '2026-12-02' AND fin > '2026-12-01';
 ```
 
-> Con los pocos datos de la semilla, el planificador puede preferir un recorrido secuencial aunque el índice exista. Para que el plan sea representativo, cargar volumen de prueba (por ejemplo con `generate_series`) antes de medir, o comparar con `SET enable_seqscan = off;` y explicar la diferencia.
+**Resultados:**
 
-| Consulta | Índice esperado | Plan (resumen) | Tiempo |
-|---|---|---|---|
-| RF7 — citas del profesional en un día | `ix_cita_prof_inicio` | _Pendiente_ | _Pendiente_ |
-| RF7 — bloqueos del día | `ix_bloqueo_prof_rango` | _Pendiente_ | _Pendiente_ |
-| RF16 — historial del paciente | `ix_cita_paciente_inicio` | _Pendiente_ | _Pendiente_ |
-| RF20/RF21 — agenda y conteo de la clínica | `ix_cita_clinica_inicio` | _Pendiente_ | _Pendiente_ |
-| RF19 — bitácora | `ix_bitacora_*` | _Pendiente_ | _Pendiente_ |
+| Consulta | Índice esperado | Índice que usó el plan | Plan (resumen) | Ejecución |
+|---|---|---|---|---|
+| RF7 — citas del profesional en un día | `ix_cita_prof_inicio` | `ex_cita_profesional_sin_solape` (GiST, parcial `estado_id = 1`) | *Index Scan*, 4 buffers | 0.490 ms |
+| RF7 — bloqueos del día (predicado distinto del de la API) | `ix_bloqueo_prof_rango` | Ninguno | *Seq Scan* sobre 3 000 filas, 77 buffers | 0.896 ms |
+| RF16 — historial del paciente | `ix_cita_paciente_inicio` | Ninguno | *Seq Scan* + *Sort* (10 001 filas devueltas), 310 buffers | 4.920 ms |
+| RF21 — conteo por estado de la clínica | `ix_cita_clinica_inicio` | `ix_cita_clinica_inicio` | *Index Scan* + *GroupAggregate*, 2 buffers | 1.182 ms |
+| RF19 — bitácora por paciente | `ix_bitacora_paciente` | `bitacora_auditoria_pkey` (recorrido inverso) | *Index Scan Backward* con *Limit* 50, 6 buffers | 0.088 ms |
+
+**Lectura de los planes:**
+
+- **RF7, citas.** La consulta tarda 0.49 ms y lee 4 buffers aunque `cita` tiene más de 10 000 filas. Los índices de RF7 son parciales (`estado_id = 1`), así que el historial atendido no entra en ellos y el costo de consultar la disponibilidad no crece con el historial. El planificador eligió el índice GiST de la *exclusion constraint* (I1), que también es parcial y cubre `profesional_id`, en lugar de `ix_cita_prof_inicio`. Como el volumen cargado son citas atendidas, el plan demuestra esa independencia del historial, pero no el comportamiento con muchas citas vigentes de un mismo profesional.
+- **RF7, bloqueos.** Este plan se midió con el predicado `inicio < X AND fin > Y`, que no es el que usa la API: `agenda.py` consulta con `tstzrange(inicio, fin) && tstzrange(...)`, la forma que admite el índice GiST de expresión `ix_bloqueo_prof_rango`. Por eso el recorrido secuencial de esta fila no refleja la consulta real.
+- **RF16.** El recorrido secuencial es correcto para estos datos: la consulta devuelve 10 001 de las 10 007 filas de `cita`, porque todas las citas de prueba pertenecen al mismo paciente, y con esa selectividad un índice no ayuda. El plan no es representativo de un paciente con pocas citas.
+- **RF21.** Usó el índice esperado. El rango de diciembre de 2026 no contiene citas del volumen de prueba (son de 2025), por lo que el plan devuelve 0 filas y el tiempo de 1.182 ms está dominado por la planificación (2.284 ms).
+- **RF19.** Con `ORDER BY bitacora_id DESC LIMIT 50` y todas las filas del mismo paciente, recorrer la clave primaria hacia atrás encuentra las 50 filas en 6 buffers sin necesitar `ix_bitacora_paciente`. El plan no demuestra ese índice.
+
+**Conclusión.** Los planes confirman que RF7 no depende del volumen histórico y que RF21 usa su índice. En RF7 (bloqueos), RF16 y RF19 el plan no usó el índice esperado, por la forma de los datos de prueba o porque el predicado medido no era el de la API; esos tres índices quedan por justificar con una carga más representativa (varios pacientes y, para los bloqueos, la consulta real de `agenda.py`).
 
 ### 15.7 Cobertura
 
@@ -1145,7 +1191,7 @@ SELECT inicio, fin
 | Requisitos con prueba parcial | 4 (RF2, RF3, RF4, RF15) |
 | Requisitos sin prueba | 2 (RF1, RF21) |
 | Invariantes con al menos una prueba | 8 / 8 |
-| Cobertura de líneas | _Pendiente_ |
+
 
 La cobertura de líneas solo se mide con `pytest-cov` sobre el código que corre dentro del proceso de pytest. Las pruebas de integración atacan la API por HTTP, de modo que el código del servidor no se contabiliza en ellas; la cifra refleja sobre todo las pruebas unitarias.
 

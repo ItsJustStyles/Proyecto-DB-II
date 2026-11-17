@@ -1,0 +1,78 @@
+@baseUrl = http://localhost:8000/api/v1
+@kcUrl = http://localhost:8080/realms/medicitas/protocol/openid-connect/token
+@password = Medicitas123!
+
+### 1. Obtener token de Recepcion (Clinica 1)
+# @name loginRecep
+POST {{kcUrl}}
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=password&client_id=medicitas-api&username=recep1a&password={{password}}
+
+### 2. Obtener token de Profesional (Clinica 1)
+# @name loginProf
+POST {{kcUrl}}
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=password&client_id=medicitas-api&username=prof1a&password={{password}}
+
+### 3. Obtener token de Admin Clinica (Clinica 1)
+# @name loginAdmin
+POST {{kcUrl}}
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=password&client_id=medicitas-api&username=admin1&password={{password}}
+
+### 4. Obtener token de Admin Clinica 2 (para prueba de aislamiento I5)
+# @name loginAdmin2
+POST {{kcUrl}}
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=password&client_id=medicitas-api&username=admin2&password={{password}}
+
+@tokenRecep = {{loginRecep.response.body.access_token}}
+@tokenProf = {{loginProf.response.body.access_token}}
+@tokenAdmin = {{loginAdmin.response.body.access_token}}
+@tokenAdmin2 = {{loginAdmin2.response.body.access_token}}
+
+### 5. RF7: Consultar disponibilidad (1ra vez MISS en PostgreSQL, 2da vez HIT en Redis)
+GET {{baseUrl}}/profesionales/1/disponibilidad?fecha=2026-12-10&servicio_id=1
+Authorization: Bearer {{tokenRecep}}
+
+### 6. RF9: Reservar cita (201 Created e invalida cache en Redis)
+# @name crearCita
+POST {{baseUrl}}/citas
+Authorization: Bearer {{tokenRecep}}
+Content-Type: application/json
+
+{
+  "paciente_id": 1,
+  "profesional_id": 1,
+  "servicio_id": 1,
+  "inicio": "2026-12-10T09:00:00-06:00"
+}
+
+### 7. I1: Intentar reservar el mismo espacio (debe responder 409 ESPACIO_TOMADO)
+POST {{baseUrl}}/citas
+Authorization: Bearer {{tokenRecep}}
+Content-Type: application/json
+
+{
+  "paciente_id": 2,
+  "profesional_id": 1,
+  "servicio_id": 1,
+  "inicio": "2026-12-10T09:00:00-06:00"
+}
+
+### 8. I5: Intentar leer cita de Clinica 1 usando token de Clinica 2 (debe responder 404)
+@citaId = {{crearCita.response.body.cita_id}}
+GET {{baseUrl}}/citas/{{citaId}}
+Authorization: Bearer {{tokenAdmin2}}
+
+### 9. RF17: Intentar consultar bitacora como Recepcion (debe responder 403)
+GET {{baseUrl}}/bitacora
+Authorization: Bearer {{tokenRecep}}
+
+### 10. RF19: Consultar bitacora de auditoria como Admin Clinica (200 OK)
+GET {{baseUrl}}/bitacora?paciente_id=1
+Authorization: Bearer {{tokenAdmin}}
