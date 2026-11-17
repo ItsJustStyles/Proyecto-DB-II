@@ -1236,9 +1236,9 @@ Se documentan de forma explícita para que las decisiones y sus consecuencias se
 | Multi-tenancy: comparación y decisión | [`Decisiones/`](Decisiones/) | Cuatro estrategias comparadas, decisión y *trade-offs* |
 | Cómo obtener un token | [`keycloak/guia.md`](keycloak/guia.md) | Ejemplo en PowerShell |
 | Migraciones | [`Base de datos/Scripts/`](Base%20de%20datos/Scripts/) | Esquema (`V1`) y datos semilla (`V2`) |
-| Colección de peticiones | _Pendiente_ | Colección versionada para la demostración (Postman, Bruno o `.http`) |
+| Colección de peticiones | `Demostracion/medicitas.http` | Colección versionada para la demostración (Postman, Bruno o `.http`) |
 | Informe de pruebas | [§14](#14-pruebas) | Qué prueba cubre cada requisito e invariante |
-| Video de demostración | _Pendiente_ | Máximo 10 minutos, sin edición: arranque, recorrido completo de una cita y prueba de carrera |
+| Video de demostración | `Videos/Video_Demostracion.mkv` | Máximo 10 minutos, sin edición: arranque, recorrido completo de una cita y prueba de carrera |
 
 ---
 
