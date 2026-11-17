@@ -29,7 +29,7 @@ Profesor: Kenneth Obando
 11. [Contrato de la API](#11-contrato-de-la-api)
 12. [Matriz de permisos](#12-matriz-de-permisos)
 13. [Requisitos funcionales e invariantes: trazabilidad](#13-requisitos-funcionales-e-invariantes-trazabilidad)
-14. [Pruebas](#14-pruebas)
+14. [Pruebas](#15-pruebas)
 15. [Criterios de aceptación](#15-criterios-de-aceptación)
 16. [Limitaciones conocidas](#16-limitaciones-conocidas)
 17. [Documentación adicional](#17-documentación-adicional)
