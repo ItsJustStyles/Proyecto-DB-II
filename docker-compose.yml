@@ -115,6 +115,7 @@ services:
       DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@db_test:5432/${DB_NAME}_test
       REDIS_URL: redis://redis:6379/1
       CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS}
+      TEST_KEYCLOAK_TOKEN_URL: http://keycloak:8080/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token
       OIDC_ISSUER: ${KEYCLOAK_PUBLIC_URL}/realms/${KEYCLOAK_REALM}
       OIDC_JWKS_URL: http://keycloak:8080/realms/${KEYCLOAK_REALM}/protocol/openid-connect/certs
       OIDC_CLIENT_ID: ${KEYCLOAK_CLIENT_ID}
