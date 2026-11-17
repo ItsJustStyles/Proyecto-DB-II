@@ -1,6 +1,6 @@
 - Database engine: PostgreSQL 16
 - Database name: MediCitas
-- Context: Plataforma SaaS multi-tenant de gestión de citas médicas (MediCitas). Cada clínica es un tenant con sus datos estrictamente aislados mediante tabla compartida: todas las tablas de negocio llevan `clinica_id` y el motor filtra cada consulta según la clínica de la sesión. Incluye profesionales, servicios, horarios, bloqueos de agenda, pacientes, citas, notas clínicas y bitácora de auditoría append-only. La identidad se delega en Keycloak (la base solo guarda el `sub` del token) y la caché de disponibilidad vive en Redis (la base es la fuente de verdad).
+- Context: Plataforma SaaS multi-tenant de gestión de citas médicas (MediCitas). Cada clínica es un tenant con sus datos estrictamente aislados mediante tabla compartida: todas las tablas de negocio llevan `clinica_id` y la aplicación filtra cada consulta por la clínica derivada de la identidad (no se usa Row-Level Security). El motor refuerza el aislamiento con claves foráneas compuestas y roles de mínimo privilegio. Incluye profesionales, servicios, horarios, bloqueos de agenda, pacientes, citas, notas clínicas y bitácora de auditoría append-only. La identidad se delega en Keycloak (la base solo guarda el `sub` del token) y la caché de disponibilidad vive en Redis (la base es la fuente de verdad).
 
 ---
 
@@ -48,15 +48,11 @@ Catálogo global de roles del sistema. Se corresponde con los roles definidos en
     - pk: si
     - null: no
     - descripcion: Identificador del rol (1 ADMIN_PLATAFORMA, 2 ADMIN_CLINICA, 3 RECEPCION, 4 PROFESIONAL).
-- codigo
+- nombre
     - tipo: varchar(30)
     - unique: si
     - null: no
-    - descripcion: Código del rol, idéntico al nombre del rol en Keycloak.
-- descripcion
-    - tipo: varchar(200)
-    - null: no
-    - descripcion: Descripción de las responsabilidades del rol.
+    - descripcion: Nombre del rol, idéntico al nombre del rol de realm en Keycloak.
 
 ---
 
@@ -246,7 +242,7 @@ Bloques semanales de atención de cada profesional. Admite varios bloques por d�
     - null: no
     - check: hora_fin > hora_inicio
     - descripcion: Hora local de fin del bloque.
-- exclude: `USING gist (profesional_id WITH =, dia_semana WITH =, timerange(hora_inicio, hora_fin) WITH &&)`
+- exclude: `USING gist (profesional_id WITH =, dia_semana WITH =, tsrange(DATE '2000-01-01' + hora_inicio, DATE '2000-01-01' + hora_fin) WITH &&)`
     - descripcion: Impide bloques solapados del mismo profesional el mismo día.
 
 ---
@@ -570,18 +566,19 @@ Para que ninguna FK pueda apuntar a una fila de otra clínica (refuerza I5 inclu
 
 # Roles de base de datos (mínimo privilegio)
 
-Roles `NOLOGIN` alineados con la matriz de permisos; el login `medicitas_app` es miembro de todos y cambia con `SET LOCAL ROLE` según el rol del token.
+Roles `NOLOGIN` alineados con la matriz de permisos; el login `medicitas_app` (`NOINHERIT`) es miembro de todos, y la aplicación activa el que corresponde con `SET LOCAL ROLE` al inicio de cada transacción, según el rol del usuario.
 
 | Rol de BD | Corresponde a | Privilegios |
 |---|---|---|
-| `db_plataforma` | Administrador de plataforma | INSERT/SELECT en `clinica`; INSERT en `usuario` (solo `rol_id = 2`). Sin acceso a pacientes, citas, notas ni bitácora. |
-| `db_admin_clinica` | Administrador de clínica | SELECT/INSERT/UPDATE en `usuario`, `profesional`, `servicio`, `profesional_servicio`, `horario_atencion`, `bloqueo_agenda`, `paciente`, `cita`; SELECT/INSERT en `bitacora_auditoria`. Sin acceso a `nota_clinica` (la matriz no se lo concede) y sin DELETE (bajas lógicas). |
+| `db_plataforma` | Administrador de plataforma | SELECT en `clinica` y catálogos; `EXECUTE` sobre la función `crear_clinica(...)` (`SECURITY DEFINER`), que crea la clínica y su primer administrador en una transacción. Sin `INSERT` directo en `usuario` y sin acceso a pacientes, citas, notas ni bitácora. |
+| `db_admin_clinica` | Administrador de clínica | SELECT/INSERT en `usuario`, `profesional`, `servicio`, `paciente` y `cita`, con UPDATE restringido a columnas (ninguna de ellas es `clinica_id`); SELECT/INSERT/DELETE en `profesional_servicio`, `horario_atencion` y `bloqueo_agenda` (tablas de configuración); SELECT/INSERT en `bitacora_auditoria`. Sin acceso a `nota_clinica` (la matriz no se lo concede) y sin DELETE sobre datos clínicos (bajas lógicas). |
 | `db_recepcion` | Recepción | SELECT/INSERT/UPDATE en `paciente` y `cita`; SELECT en catálogos, `profesional`, `servicio`, `horario_atencion`, `bloqueo_agenda`; INSERT en `bitacora_auditoria`. Sin acceso a `nota_clinica`. |
-| `db_profesional` | Profesional de salud | SELECT en `cita`, `paciente`, `horario_atencion`, `bloqueo_agenda` (+ INSERT/UPDATE en sus propios `horario_atencion` y `bloqueo_agenda`); UPDATE de `estado_id` en `cita`; SELECT/INSERT/UPDATE en `nota_clinica`; INSERT en `bitacora_auditoria`. |
+| `db_profesional` | Profesional de salud | SELECT en `cita`, `paciente`, `profesional`, `servicio`, `profesional_servicio`, `horario_atencion` y `bloqueo_agenda`; INSERT/UPDATE/DELETE en `horario_atencion` y `bloqueo_agenda`; UPDATE de `estado_id` y `desenlace_registrado_por` en `cita`; SELECT/INSERT en `nota_clinica` y UPDATE de `contenido`; INSERT en `bitacora_auditoria`. |
 
 Notas:
-- La restricción "solo los propios" y "solo de citas propias" se refuerza con políticas RLS adicionales en `horario_atencion`, `bloqueo_agenda`, `cita` y `nota_clinica` para `db_profesional` (`profesional_id` = profesional del `app.usuario_id`).
-- Ningún rol tiene DELETE ni TRUNCATE sobre tablas de negocio.
+- **No se utiliza Row-Level Security.** El esquema no define políticas RLS, de modo que el motor no puede distinguir las filas propias de un profesional. Las restricciones "solo los propios" (horarios, bloqueos, desenlace) y "solo de citas propias" (notas) las aplica la capa de acceso de la aplicación (`exigir_profesional_propio`, `mi_profesional_id`).
+- Los privilegios por rol limitan *qué tablas y columnas* puede tocar cada perfil, pero no *qué filas*: la separación entre clínicas la garantiza la aplicación (filtro `clinica_id` tomado de la identidad) y las claves foráneas compuestas.
+- Ningún rol tiene DELETE sobre datos clínicos ni TRUNCATE sobre ninguna tabla de negocio; el DELETE solo se concede en tablas de configuración (`profesional_servicio`, `horario_atencion`, `bloqueo_agenda`).
 - Cualquier ampliación de la matriz mínima debe documentarse y justificarse.
 
 ---
@@ -590,21 +587,22 @@ Notas:
 
 ```sql
 REVOKE ALL ON bitacora_auditoria FROM PUBLIC;
-GRANT SELECT, INSERT ON bitacora_auditoria TO db_admin_clinica, db_recepcion, db_profesional;
+GRANT INSERT ON bitacora_auditoria TO db_admin_clinica, db_recepcion, db_profesional;
+GRANT SELECT ON bitacora_auditoria TO db_admin_clinica;   -- RF19: solo el administrador de clínica consulta
 -- ningún rol recibe UPDATE, DELETE ni TRUNCATE
 
-CREATE FUNCTION bitacora_inmutable() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE FUNCTION fn_bitacora_inmutable() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     RAISE EXCEPTION 'bitacora_auditoria es append-only';
 END $$;
 
 CREATE TRIGGER trg_bitacora_no_update_delete
     BEFORE UPDATE OR DELETE ON bitacora_auditoria
-    FOR EACH ROW EXECUTE FUNCTION bitacora_inmutable();
+    FOR EACH ROW EXECUTE FUNCTION fn_bitacora_inmutable();
 
 CREATE TRIGGER trg_bitacora_no_truncate
     BEFORE TRUNCATE ON bitacora_auditoria
-    FOR EACH STATEMENT EXECUTE FUNCTION bitacora_inmutable();
+    FOR EACH STATEMENT EXECUTE FUNCTION fn_bitacora_inmutable();
 ```
 
 Doble barrera: privilegios (el motor niega la operación) y triggers (por si en el futuro se otorgara un permiso por error). Solo el dueño del esquema podría eliminar los triggers, y ese rol no lo usa la aplicación.
@@ -616,11 +614,11 @@ Doble barrera: privilegios (el motor niega la operación) y triggers (por si en 
 | Trigger | Tabla | Qué garantiza |
 |---|---|---|
 | trg_cita_fin_por_servicio | cita (BEFORE INSERT/UPDATE) | `fin = inicio + servicio.duracion_min` (I4); rechaza cualquier cambio de `fin` que no provenga de un cambio de `inicio` en reprogramación. |
-| trg_cita_valida_agenda | cita (BEFORE INSERT/UPDATE de inicio/profesional) | La cita cae dentro de un bloque de `horario_atencion` del profesional (interpretado en la zona de la clínica) y no intersecta ningún `bloqueo_agenda` (I3); el profesional tiene asociado el servicio. |
+| trg_cita_valida_agenda | cita (BEFORE INSERT/UPDATE; solo revalida si cambian inicio, profesional o servicio) | La cita cae dentro de un bloque de `horario_atencion` del profesional (interpretado en la zona de la clínica) y no intersecta ningún `bloqueo_agenda` (I3); el profesional tiene asociado el servicio. |
 | trg_cita_transicion_estado | cita (BEFORE UPDATE OF estado_id) | Solo se permite RESERVADA → ATENDIDA / AUSENTE / CANCELADA / REPROGRAMADA; los estados finales no admiten salida (RF13). ATENDIDA y AUSENTE solo si `now() >= inicio` (RF12). |
 | trg_nota_cita_atendida | nota_clinica (BEFORE INSERT) | La cita referenciada está en estado ATENDIDA (RF15). |
 | trg_profesional_usuario_rol | profesional (BEFORE INSERT/UPDATE) | El usuario ligado tiene `rol_id = 4` (PROFESIONAL). |
-| trg_servicio_especialidad | profesional_servicio (BEFORE INSERT) | La especialidad del profesional coincide con la que requiere el servicio. |
+| trg_servicio_especialidad | profesional_servicio (BEFORE INSERT/UPDATE) | La especialidad del profesional coincide con la que requiere el servicio. |
 
 ---
 
@@ -630,4 +628,4 @@ Doble barrera: privilegios (el motor niega la operación) y triggers (por si en 
 - **2FN**: en las tablas con clave compuesta (`profesional_servicio`) no hay atributos descriptivos, solo la clave.
 - **3FN**: no hay dependencias transitivas; especialidad, rol y estado viven en catálogos, y los datos de la clínica no se repiten en sus entidades hijas.
 - **Desnormalización deliberada 1 (`cita.fin`)**: derivable de `inicio` y la duración del servicio, pero necesaria para las exclusion constraints I1/I2, y además congela la duración de citas ya agendadas ante cambios del catálogo. Se mantiene consistente con un trigger (I4).
-- **Desnormalización deliberada 2 (`clinica_id` en tablas hijas)**: es redundante respecto a la cadena de FKs, pero es lo que permite RLS directa (sin joins en las políticas) y las FK compuestas que impiden referencias entre tenants.
+- **Desnormalización deliberada 2 (`clinica_id` en tablas hijas)**: es redundante respecto a la cadena de FKs, pero es lo que permite filtrar cada tabla directamente por clínica, sin joins, y las FK compuestas que impiden referencias entre tenants.
