@@ -920,8 +920,250 @@ Siete comprobaciones deciden si la etapa funciona; todas se ejecutan sobre el re
 | 7 | **Las pruebas corren.** El comando documentado ejecuta las unitarias y las de integración, y todas pasan | [§14.1](#141-cómo-ejecutar-las-pruebas) | Completa |
 
 ---
+## 15. Pruebas
 
-## 15. Limitaciones conocidas
+La suite vive en `tests/` (`tests/unit/` para las unitarias y `tests/unit/integration/` para las de integración) y usa **pytest**. Tiene dos niveles: pruebas **unitarias**, que aíslan la lógica de dominio y no necesitan la pila, y pruebas de **integración**, que ejercitan la API real, Keycloak real, Redis real y PostgreSQL real levantados por Compose (marcadas con `@pytest.mark.integration`). Cada invariante (I1 a I8) tiene al menos una prueba; la trazabilidad completa está en la [§13](#13-requisitos-funcionales-e-invariantes-trazabilidad).
+
+### 15.1 Cómo ejecutar las pruebas
+
+Con la pila arriba y el servicio de pruebas `app_test` (perfil `test` de Compose) levantado, desde la raíz del repositorio:
+
+```bash
+docker compose --profile test exec app_test pytest -v -s
+```
+
+Es un único comando, sin preparación manual de datos: las pruebas parten de los datos semilla de `V2__seed.sql` y obtienen sus propios tokens de Keycloak. La opción `-v` lista cada prueba y `-s` deja ver la salida de la medición de latencia de la caché.
+
+Variantes útiles:
+
+```bash
+docker compose --profile test exec app_test pytest -m "not integration"   # solo unitarias
+docker compose --profile test exec app_test pytest -m integration         # solo integración
+docker compose --profile test exec app_test pytest -s -k latencia         # solo la medición de caché
+```
+
+| Dato | Valor |
+|---|---|
+| Comando único | `docker compose --profile test exec app_test pytest -v -s` |
+| Frameworks y bibliotecas | Python 3.12, `pytest` 9.2, `httpx` (cliente HTTP), `psycopg` (pruebas del motor), `PyJWT` (token con firma ajena) |
+| Ubicación | `tests/unit/` (unitarias) y `tests/unit/integration/` (integración); configuración en `pytest.ini` |
+| Datos de partida | Datos semilla de `V2__seed.sql` (sin preparación manual) |
+| Duración | 31.51 s para las 96 pruebas |
+
+**Variables de entorno de las pruebas** (tienen valor por defecto):
+
+| Variable | Valor por defecto | Uso |
+|---|---|---|
+| `TEST_BASE_URL` | `http://localhost:8000` | URL de la API bajo prueba |
+| `TEST_KEYCLOAK_TOKEN_URL` | `http://localhost:8080/realms/medicitas/protocol/openid-connect/token` | Endpoint donde se piden los tokens |
+| `DATABASE_URL` | — (la define Compose) | Conexión de `test_motor.py`, que se conecta como la aplicación y hace `SET ROLE` |
+
+**Diseño de la suite para que sea repetible:**
+
+- Las pruebas que reservan buscan un espacio libre en una fecha futura **aleatoria** (entre 3 y 28 días), de modo que corridas sucesivas no chocan entre sí.
+- Toda cita creada se cancela al terminar (fixture `limpiar_citas`) y todo horario, bloqueo o cambio de servicio se revierte en un `finally`, dejando el estado como estaba.
+- Los tokens se piden una sola vez por usuario y se reutilizan durante la sesión.
+
+### 15.2 Estrategia
+
+| Tipo | Archivos | Qué ejercita |
+|---|---|---|
+| **Unitarias** | `test_permisos.py` · `test_slots.py` · `test_tenancy.py` | Matriz de permisos (24 combinaciones permiso × rol, más el aislamiento del administrador de plataforma y la denegación por defecto); algoritmo `calcular_slots` (bloques, jornada partida, citas, bloqueos, espacios pasados, duración); guarda de `tenancy.py` (consulta sin `%(clinica_id)s` rechazada, clínica del llamador sobrescrita, identidad sin clínica) |
+| **Integración: ciclo de la cita** | `test_ciclo_cita.py` · `test_servicios_duracion.py` · `test_horarios_bloqueos.py` | Reservar, reprogramar, cancelar y desenlace con sus códigos; transiciones inválidas; I2, I3 e I4 |
+| **Integración: concurrencia (I1)** | `test_carrera.py` | Carrera por el último espacio, contención de 8 clientes y reprogramaciones simultáneas |
+| **Integración: aislamiento (I5)** | `test_aislamiento.py` | Intentos deliberados de fuga entre clínicas |
+| **Integración: identidad (RF17)** | `test_identidad.py` | 401, 403 y 200; token con firma ajena; cuerpo mal formado |
+| **Integración: caché (I7, I8)** | `test_cache.py` · `test_cache_disponibilidad.py` | Consultar → reservar → reconsultar; reprogramación entre fechas; cambio de horario; medición de latencia |
+| **Integración: auditoría y motor (I6)** | `test_auditoria.py` · `test_motor.py` | Bitácora append-only, roles de mínimo privilegio, claves foráneas compuestas y triggers directamente contra PostgreSQL |
+
+### 15.3 Resultados de la ejecución
+
+| Suite | Total | Aprobadas | Fallidas | Duración |
+|---|---:|---:|---:|---|
+| Unitarias | 39 | 39 | 0 | — |
+| Integración | 57 | 57 | 0 | — |
+| **Total** | **96** | **96** | **0** | **31.51 s** |
+
+Los totales cuentan las parametrizaciones (24 casos en `test_matriz` y 9 en las pruebas de bitácora de `test_motor.py`). El único aviso de la ejecución (`InsecureKeyLengthWarning`) proviene de `test_token_con_firma_ajena_es_401`, que firma a propósito con una llave de 7 bytes para forjar un token; es esperado y no afecta el resultado.
+
+Salida de la ejecución (resumida: cada una de las 96 pruebas aparece como `PASSED` en la salida completa):
+
+```text
+$ docker compose --profile test exec app_test pytest -v -s
+platform linux -- Python 3.12.16, pytest-9.2.0, pluggy-1.7.0
+rootdir: /srv
+configfile: pytest.ini
+testpaths: tests
+collected 96 items
+
+tests/unit/integration/test_aislamiento.py::test_listado_con_clinica_id_manipulado_devuelve_solo_la_propia PASSED
+tests/unit/integration/test_aislamiento.py::test_acceso_directo_por_id_ajeno_es_404 PASSED
+[...]
+tests/unit/integration/test_cache_disponibilidad.py::test_medicion_latencia_antes_y_despues_de_cache
+[Benchmark RF7] MISS (PostgreSQL): 10.58 ms | HIT (Redis) promedio: 3.84 ms | mediana: 3.57 ms
+PASSED
+tests/unit/integration/test_carrera.py::test_dos_recepcionistas_un_solo_espacio PASSED
+tests/unit/integration/test_carrera.py::test_muchos_clientes_un_solo_espacio PASSED
+tests/unit/integration/test_carrera.py::test_reprogramaciones_concurrentes_de_la_misma_cita PASSED
+[...]
+tests/unit/test_tenancy.py::test_identidad_sin_clinica_no_consulta_tablas_de_negocio PASSED
+
+=========================== warnings summary ===========================
+tests/unit/integration/test_identidad.py::test_token_con_firma_ajena_es_401
+  InsecureKeyLengthWarning: The HMAC key is 7 bytes long, which is below the minimum recommended length of 32 bytes for SHA256.
+
+======================= 96 passed, 1 warning in 31.51s =======================
+```
+
+### 15.4 Pruebas obligatorias del núcleo
+
+#### a) Prueba de carrera (I1)
+
+Archivo: `test_carrera.py`.
+
+| Aspecto | Detalle |
+|---|---|
+| Escenario | Dos recepcionistas (`recep1a` y `recep1b`) reservan el **mismo** espacio libre de un profesional, con pacientes distintos para aislar I1 de I2 |
+| Resultado esperado | Exactamente un `201` y un `409 ESPACIO_TOMADO`; una sola cita vigente en ese instante |
+| Reproducibilidad | Cada cliente corre en su propio hilo, con su propia conexión HTTP y su propio token. Un `threading.Barrier` libera a todos los hilos al mismo tiempo, y la prueba se repite en rondas con espacios distintos |
+| Repeticiones | 10 rondas con dos clientes; una prueba con 8 clientes simultáneos por un mismo espacio (exactamente un `201` y siete `409`); una prueba de dos reprogramaciones simultáneas de la misma cita |
+| Verificación de "sin duplicados" | Tras cada ronda se consulta la agenda y se cuenta que haya exactamente **una** cita vigente en ese instante para ese profesional |
+| Resultado obtenido | Ver la salida de [§14.3](#143-resultados-de-la-ejecución) |
+
+La carrera sobre **reprogramación** (RF10) verifica que una gana y la otra recibe `409`: la cita original se bloquea con `SELECT … FOR UPDATE`, de modo que la perdedora la encuentra ya `REPROGRAMADA`, y al final queda una sola cita vigente. Que la original siga vigente cuando la reprogramación falla se comprueba en `test_ciclo_cita.py::test_reprogramar_a_espacio_ocupado_deja_la_original_intacta`.
+
+#### b) Pruebas de aislamiento (I5)
+
+Cada fila es un intento deliberado de romper el aislamiento con una sesión autenticada en la Clínica Norte contra datos de la Clínica Sur.
+
+| # | Intento de fuga | Resultado esperado | Prueba |
+|---|---|---|---|
+| 1 | Acceso directo por id ajeno: `GET /pacientes/{id}`, `GET /pacientes/{id}/citas`, `PATCH /pacientes/{id}`, `GET /citas/{id}`, cancelar y registrar desenlace de una cita ajena | `404 NO_ENCONTRADO` en todos | `test_aislamiento::test_acceso_directo_por_id_ajeno_es_404` |
+| 2 | `GET /pacientes` con `clinica_id`, `clinicaId` o `tenant` apuntando a otra clínica | El parámetro se ignora; el resultado es idéntico al propio y no contiene pacientes ajenos | `test_aislamiento::test_listado_con_clinica_id_manipulado_devuelve_solo_la_propia` |
+| 3 | `POST /pacientes` con `"clinica_id": 2` en el cuerpo | Se crea en la clínica propia; no aparece en la clínica 2 | `test_aislamiento::test_clinica_id_en_el_cuerpo_no_tiene_efecto` |
+| 4 | `POST /citas` con paciente, profesional o servicio de otra clínica | Paciente y servicio: `422` (el paciente con `REFERENCIA_INVALIDA`, por la FK compuesta); profesional: `404` o `422` | `test_aislamiento::test_no_se_puede_reservar_con_paciente_o_servicio_de_otra_clinica` |
+| 5 | `GET /profesionales/{id}/disponibilidad` con un profesional ajeno | `404` o `422` | `test_aislamiento::test_disponibilidad_de_profesional_ajeno_es_404` |
+| 6 | `GET /bitacora` sin filtro y filtrando por un paciente ajeno | Ninguna fila de pacientes ajenos; lista vacía con el filtro | `test_aislamiento::test_bitacora_solo_muestra_la_propia_clinica` |
+| 7 | Leer la nota clínica de una cita ajena | `404` | `test_aislamiento::test_notas_de_otra_clinica_no_son_accesibles` |
+| 8 | Consulta de negocio sin el marcador `%(clinica_id)s` | `TenantGuardError` | `test_tenancy::test_consulta_sin_filtro_es_rechazada` |
+| 9 | El llamador (o un parámetro manipulado) pasa otra `clinica_id` a la capa de datos | Gana la clínica de la identidad | `test_tenancy::test_clinica_del_llamador_se_sobrescribe_con_la_de_la_identidad` |
+| 10 | Identidad sin clínica intenta consultar tablas de negocio | `TenantGuardError` | `test_tenancy::test_identidad_sin_clinica_no_consulta_tablas_de_negocio` |
+| 11 | En el motor: insertar una cita de la clínica 1 con un paciente de la clínica 2 | `ForeignKeyViolation` (FK compuesta) | `test_motor::test_fk_compuesta_impide_cita_con_paciente_de_otra_clinica` |
+| 12 | En el motor: `UPDATE … SET clinica_id` sobre `paciente` o `cita` | `InsufficientPrivilege` | `test_motor::test_ningun_rol_puede_cambiar_la_clinica_de_una_fila` |
+
+#### c) Pruebas de identidad (RF17)
+
+| Caso | Resultado esperado | Prueba |
+|---|---|---|
+| Ruta protegida sin token | `401` | `test_identidad::test_ruta_protegida_sin_token_es_401` |
+| Token malformado | `401` | `test_identidad::test_token_basura_es_401` |
+| JWT con forma válida pero firmado con otra llave (HS256) | `401` | `test_identidad::test_token_con_firma_ajena_es_401` |
+| Token válido de un rol sin permiso (recepción o administrador de clínica creando clínicas, profesional reservando, recepción consultando la bitácora, profesional listando usuarios, plataforma leyendo pacientes) | `403` | `test_identidad::test_rol_incorrecto_es_403` |
+| Token válido del rol adecuado | `200` | `test_identidad::test_rol_correcto_funciona` |
+| Cuerpo JSON mal formado, recurso inexistente, `/health` | `422`, `404`, `200`; el servicio sigue operativo | `test_identidad::test_cuerpo_mal_formado_no_tumba_el_servicio` |
+| Profesional intenta registrar el desenlace de una cita que no es suya | `403` | `test_ciclo_cita::test_profesional_registra_desenlace_solo_de_sus_citas` |
+| Matriz de permisos completa (permiso × rol) | Según [§12](#12-matriz-de-permisos) | `test_permisos::test_matriz` (24 casos) y `test_el_administrador_de_plataforma_no_accede_a_datos_clinicos` |
+| Permiso desconocido | Denegado | `test_permisos::test_permiso_desconocido_se_deniega` |
+
+#### d) Prueba de la caché (I8)
+
+| Paso | Acción | Resultado esperado | Prueba |
+|---|---|---|---|
+| 1 | Consultar la disponibilidad dos veces (la segunda se sirve desde la caché) | Ambas respuestas coinciden y el espacio *E* aparece | `test_cache::test_reserva_invalida_la_cache_de_inmediato` |
+| 2 | Reservar el espacio *E* | `201` | ídem |
+| 3 | Volver a consultar **sin esperar** al TTL | *E* ya no aparece, y desaparece también el espacio contiguo que se solapa | ídem |
+| 4 | Cancelar la cita | `200` | `test_cache::test_cancelar_libera_el_espacio_de_inmediato` |
+| 5 | Volver a consultar | *E* reaparece (I7) | ídem |
+
+Casos adicionales que sostienen I8:
+
+| Caso | Resultado esperado | Prueba |
+|---|---|---|
+| Reprogramar una cita de una fecha a otra | Se invalidan las dos fechas: el espacio de origen reaparece y el de destino desaparece | `test_cache_disponibilidad::test_reprogramar_entre_dias_actualiza_cache_origen_y_destino` |
+| Agregar un bloque semanal a un día cuya lista vacía ya estaba en caché | La siguiente consulta devuelve los espacios nuevos | `test_cache_disponibilidad::test_cambio_horario_semanal_invalida_cache_del_profesional` |
+| Registrar y eliminar un bloqueo con la caché llena | La disponibilidad se retira y luego vuelve | `test_cache::test_bloqueo_retira_disponibilidad_aunque_haya_cache` |
+
+#### e) Prueba de la bitácora (I6)
+
+| Caso | Resultado esperado | Prueba |
+|---|---|---|
+| `UPDATE`, `DELETE` y `TRUNCATE` sobre `bitacora_auditoria` con cada uno de los tres roles de BD (9 combinaciones) | `InsufficientPrivilege` | `test_motor::test_bitacora_no_admite_update_delete_ni_truncate` |
+| Recepción y profesional leyendo la bitácora | `InsufficientPrivilege` | `test_motor::test_recepcion_y_profesional_no_leen_bitacora` |
+| Leer el detalle de un paciente | Aparece un registro nuevo `LECTURA` / `PACIENTE_CONTACTO` | `test_auditoria::test_lectura_y_actualizacion_de_paciente_registran_auditoria` |
+| Cambiar el teléfono de un paciente | Aparece un registro nuevo `ACTUALIZACION` / `PACIENTE_CONTACTO` | ídem |
+| Leer una nota clínica | Aparece un registro nuevo `LECTURA` / `NOTA_CLINICA` | `test_auditoria::test_lectura_de_nota_clinica_registra_auditoria` |
+| Filtros por `usuario_id` y `paciente_id` (RF19) | Solo coincidencias exactas | `test_auditoria::test_filtros_bitacora_y_rutas_inmutables_en_api` |
+| `DELETE`, `PATCH` y `PUT` sobre `/bitacora/{id}` | `404` o `405` (la API no expone rutas de modificación) | ídem |
+
+Otras garantías del motor verificadas directamente contra PostgreSQL (`test_motor.py`): administrador de clínica, recepción y plataforma no leen `nota_clinica`; el rol de plataforma no accede a `paciente`, `cita`, `profesional` ni `bitacora_auditoria`; una cita en estado final no admite transición (SQLSTATE `MC001`); una nota solo se admite sobre una cita atendida.
+
+### 15.5 Medición de la caché
+
+La prueba `test_cache_disponibilidad::test_medicion_latencia_antes_y_despues_de_cache` mide la misma consulta en dos condiciones y las imprime para el informe (se ve con `-s`).
+
+| Escenario | Sin caché (*miss*) | Con caché (*hit*) | Mejora |
+|---|---|---|---|
+| Latencia de `GET /profesionales/{id}/disponibilidad` (ms) | 10.58 | 3.84 (promedio de 30) | −64 % (≈ 2.8× más rápido) |
+| Mediana de los 30 *hits* (ms) | — | 3.57 | −66 % (≈ 3.0× más rápido, frente al *miss*) |
+
+Metodología: se elige un día hábil a 60 días, que ninguna prueba consulta, para forzar un *miss* real (consulta a PostgreSQL, cálculo de espacios y escritura en Redis). Luego se hacen 30 consultas idénticas servidas desde Redis y se verifica que todas devuelven los mismos espacios que el *miss*. La latencia se mide por HTTP desde el cliente de pruebas, por lo que incluye la validación del token y la resolución de la identidad, además del acceso al dato. Se reporta el promedio y la mediana de los *hits* frente a un único *miss*. La medición se hizo en una máquina de desarrollo con Docker en Windows y con los datos semilla, que son pocos; los valores absolutos varían entre corridas y la diferencia debería crecer con más datos, porque el *miss* cuesta más cuanto más citas haya que leer y el *hit* no.
+
+### 15.6 Índices y planes de ejecución
+
+Cada índice se justifica con el plan de la consulta que pretende servir, empezando por RF7. Para obtener los planes:
+
+```bash
+docker compose exec db psql -U MediCitas -d MediCitas
+```
+
+```sql
+-- RF7: citas vigentes de un profesional en un día
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT inicio, fin
+  FROM cita
+ WHERE clinica_id = 1
+   AND profesional_id = 1
+   AND estado_id = 1
+   AND inicio < '2026-12-02' AND fin > '2026-12-01';
+```
+
+> Con los pocos datos de la semilla, el planificador puede preferir un recorrido secuencial aunque el índice exista. Para que el plan sea representativo, cargar volumen de prueba (por ejemplo con `generate_series`) antes de medir, o comparar con `SET enable_seqscan = off;` y explicar la diferencia.
+
+| Consulta | Índice esperado | Plan (resumen) | Tiempo |
+|---|---|---|---|
+| RF7 — citas del profesional en un día | `ix_cita_prof_inicio` | _Pendiente_ | _Pendiente_ |
+| RF7 — bloqueos del día | `ix_bloqueo_prof_rango` | _Pendiente_ | _Pendiente_ |
+| RF16 — historial del paciente | `ix_cita_paciente_inicio` | _Pendiente_ | _Pendiente_ |
+| RF20/RF21 — agenda y conteo de la clínica | `ix_cita_clinica_inicio` | _Pendiente_ | _Pendiente_ |
+| RF19 — bitácora | `ix_bitacora_*` | _Pendiente_ | _Pendiente_ |
+
+### 15.7 Cobertura
+
+| Métrica | Valor |
+|---|---|
+| Requisitos funcionales con prueba directa | 15 / 21 (RF5 a RF14, RF16 a RF20 ya cuentan; ver brechas) |
+| Requisitos con prueba parcial | 4 (RF2, RF3, RF4, RF15) |
+| Requisitos sin prueba | 2 (RF1, RF21) |
+| Invariantes con al menos una prueba | 8 / 8 |
+| Cobertura de líneas | _Pendiente_ |
+
+La cobertura de líneas solo se mide con `pytest-cov` sobre el código que corre dentro del proceso de pytest. Las pruebas de integración atacan la API por HTTP, de modo que el código del servidor no se contabiliza en ellas; la cifra refleja sobre todo las pruebas unitarias.
+
+**Brechas conocidas** (casos que la suite aún no ejercita):
+
+| Caso | Situación |
+|---|---|
+| RF1: alta de clínica con su primer administrador | Solo se prueba el `403` de los roles que no pueden hacerla |
+| RF2: alta, cambio de rol y baja lógica de usuarios | Solo se prueba el listado (`200` / `403`) |
+| RF3 y RF4: alta de servicios y de profesionales, habilitar o retirar servicios | Solo se prueba la modificación de la duración de un servicio |
+| RF15: `POST` y `PUT` de la nota por la API | Se prueba la lectura auditada y la regla del motor, no la escritura vía API |
+| RF21: conteo de citas por estado | Sin prueba |
+| Token expirado → `401` | Sin prueba automatizada |
+| Usuario válido en Keycloak pero sin registro en `usuario` → `403 USUARIO_NO_REGISTRADO` | Sin prueba automatizada |
+| Triggers de la bitácora (`trg_bitacora_no_update_delete`, `trg_bitacora_no_truncate`) | La prueba del motor choca antes con la barrera de privilegios; el trigger no se ejercita por separado |
+---
+
+## 16. Limitaciones conocidas
 
 Se documentan de forma explícita para que las decisiones y sus consecuencias sean transparentes.
 
@@ -939,7 +1181,7 @@ Se documentan de forma explícita para que las decisiones y sus consecuencias se
 
 ---
 
-## 16. Documentación adicional
+## 17. Documentación adicional
 
 | Documento | Ubicación | Contenido |
 |---|---|---|
@@ -954,10 +1196,10 @@ Se documentan de forma explícita para que las decisiones y sus consecuencias se
 
 ---
 
-## 17. Equipo
+## 18. Equipo
 
 | Integrante | Carnet  | 
-|---|---|---|---|
+|---|---|
 | _Justin Lacayo Picado_ | _2025088308_ | 
 | _Gabriel Solano Salazar_ | _2025077266_ |
 
