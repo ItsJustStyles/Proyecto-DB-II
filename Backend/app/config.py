@@ -12,6 +12,7 @@ class Settings:
     oidc_issuer: str
     oidc_jwks_url: str
     oidc_client_id: str
+    slot_step_min: int
 
 
 def load_settings() -> Settings:
@@ -26,6 +27,7 @@ def load_settings() -> Settings:
             "OIDC_JWKS_URL", "http://keycloak:8080/realms/medicitas/protocol/openid-connect/certs"
         ),
         oidc_client_id=os.environ.get("OIDC_CLIENT_ID", "medicitas-api"),
+        slot_step_min=int(os.environ.get("SLOT_STEP_MIN", "15"))
     )
 
 
