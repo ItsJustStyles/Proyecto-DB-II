@@ -132,12 +132,6 @@ def traducir_error_bd(e: psycopg.Error) -> HTTPException:
     return _http(500, "ERROR_INTERNO", "Error interno")
 
 async def run(principal: Principal, fn: Callable[[Tx], Awaitable[Any]]) -> Any:
-    """
-    Ejecuta `fn` en una transaccion READ COMMITTED con el rol de BD del usuario.
-
-    Reintenta deadlocks (40P01) y fallos de serializacion (40001). Si `fn` lanza
-    HTTPException la transaccion se revierte y la excepcion se propaga.
-    """
     assert pool is not None
     intento = 0
     while True:
@@ -147,6 +141,14 @@ async def run(principal: Principal, fn: Callable[[Tx], Awaitable[Any]]) -> Any:
                 async with conn.transaction():
                     await conn.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
                     await conn.execute(sql.SQL("SET LOCAL ROLE {}").format(sql.Identifier(principal.rol_bd)))
+                    
+                    # Inyectar el tenant activo en la sesion de PostgreSQL para RLS (is_local=True)
+                    clinica_str = "" if principal.clinica_id is None else str(principal.clinica_id)
+                    await conn.execute(
+                        "SELECT set_config('app.clinica_id', %(cid)s, true)",
+                        {"cid": clinica_str},
+                    )
+                    
                     tx = Tx(conn, principal)
                     result = await fn(tx)
             break
@@ -159,6 +161,6 @@ async def run(principal: Principal, fn: Callable[[Tx], Awaitable[Any]]) -> Any:
     for cb in tx.after_commit if tx else []:
         try:
             await cb()
-        except Exception:  # la invalidacion de cache nunca debe romper una operacion ya confirmada
+        except Exception:
             log.exception("Fallo en accion posterior al commit")
     return result
