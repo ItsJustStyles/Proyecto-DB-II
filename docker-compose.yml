@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_DB: ${DB_NAME}
     ports:
-      - "5433:5432"
+      - "5433:${DB_PORT}"
     volumes:
       - MediCitasData:/var/lib/postgresql/data
     healthcheck:
@@ -33,7 +33,7 @@ services:
       db:
         condition: service_healthy
     command:
-      - -url=jdbc:postgresql://db:5432/${DB_NAME}
+      - -url=jdbc:postgresql://db:${DB_PORT}/${DB_NAME}
       - -user=${DB_USER}
       - -password=${DB_PASSWORD}
       - -placeholders.medicitas_app_password=${MEDICITAS_APP_PASSWORD}
@@ -59,7 +59,7 @@ services:
   app:
     build: ./App/Backend
     environment:
-      DATABASE_URL: postgresql://medicitas_app:${MEDICITAS_APP_PASSWORD}@db:5432/${DB_NAME}
+      DATABASE_URL: postgresql://medicitas_app:${MEDICITAS_APP_PASSWORD}@db:{DB_PORT}/${DB_NAME}
       REDIS_URL: redis://redis:6379/0
       CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS}
       OIDC_ISSUER: ${KEYCLOAK_PUBLIC_URL}/realms/${KEYCLOAK_REALM}
@@ -133,6 +133,22 @@ services:
       redis:
         condition: service_healthy
       flyway_test:
+        condition: service_completed_successfully
+
+  # Analisis:
+
+  etl:
+    build: ./Analytics/etl
+    profiles: ["etl"]
+    environment:
+      DB_HOST: db
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - etl_datos:/datos
+    depends_on:
+      flyway:
         condition: service_completed_successfully
 
 volumes:
