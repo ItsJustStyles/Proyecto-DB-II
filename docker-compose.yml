@@ -138,18 +138,20 @@ services:
   # Analisis:
 
   etl:
-    build: ./Analytics/etl
+    build: ./Analytics
     profiles: ["etl"]
     environment:
       DB_HOST: db
       DB_NAME: ${DB_NAME}
       DB_USER: ${DB_USER}
+      DB_PORT: ${DB_PORT}
       DB_PASSWORD: ${DB_PASSWORD}
     volumes:
-      - etl_datos:/datos
+      - etl_datos:/elt_datos
     depends_on:
       flyway:
         condition: service_completed_successfully
 
 volumes:
   MediCitasData:
+  etl_datos:
