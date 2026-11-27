@@ -483,7 +483,7 @@ BEGIN
         CREATE ROLE db_profesional NOLOGIN;
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'medicitas_app') THEN
-        CREATE ROLE medicitas_app LOGIN NOINHERIT PASSWORD 'cambiar_esta_contrasena';
+        EXECUTE format('CREATE ROLE medicitas_app LOGIN NOINHERIT PASSWORD %L', '${medicitas_app_password}');
     END IF;
 END $$;
 

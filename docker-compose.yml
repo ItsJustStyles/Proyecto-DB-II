@@ -36,6 +36,7 @@ services:
       - -url=jdbc:postgresql://db:5432/${DB_NAME}
       - -user=${DB_USER}
       - -password=${DB_PASSWORD}
+      - -placeholders.medicitas_app_password=${MEDICITAS_APP_PASSWORD}
       - -baselineOnMigrate=true
       - migrate
     volumes:
@@ -58,7 +59,7 @@ services:
   app:
     build: ./App/Backend
     environment:
-      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
+      DATABASE_URL: postgresql://medicitas_app:${MEDICITAS_APP_PASSWORD}@db:5432/${DB_NAME}
       REDIS_URL: redis://redis:6379/0
       CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS}
       OIDC_ISSUER: ${KEYCLOAK_PUBLIC_URL}/realms/${KEYCLOAK_REALM}
@@ -104,16 +105,19 @@ services:
       - -url=jdbc:postgresql://db_test:5432/${DB_NAME}_test
       - -user=${DB_USER}
       - -password=${DB_PASSWORD}
+      - -placeholders.medicitas_app_password=${MEDICITAS_APP_PASSWORD}
+      - -locations=filesystem:/flyway/sql,filesystem:/flyway/tests
       - -baselineOnMigrate=true
       - migrate
     volumes:
-      - "./App/Base de datos/Tests:/flyway/sql"
+      - "./App/Base de datos/Scripts:/flyway/sql"
+      - "./App/Base de datos/Tests:/flyway/tests"
 
   app_test:
     build: ./App/Backend
     profiles: ["test"]
     environment:
-      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@db_test:5432/${DB_NAME}_test
+      DATABASE_URL: postgresql://medicitas_app:${MEDICITAS_APP_PASSWORD}@db_test:5432/${DB_NAME}_test
       REDIS_URL: redis://redis:6379/1
       CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS}
       TEST_KEYCLOAK_TOKEN_URL: http://keycloak:8080/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token
